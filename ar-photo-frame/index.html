@@ -1,0 +1,2153 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>長者節日 AR 影相框</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E%F0%9F%93%B7%3C/text%3E%3C/svg%3E">
+<!--
+  長者節日 AR 影相框
+  - 單一 HTML 檔案，用 Chrome 開啟
+  - 臉部偵測：MediaPipe Tasks Vision Face Landmarker（由 jsDelivr 載入程式庫）
+  - 所有鏡頭影像只喺本機瀏覽器處理，唔會上載
+  - 所有裝飾都係用 Canvas 即場畫出，冇用任何外部圖片
+  啟動方法：喺呢個資料夾執行  python3 -m http.server 8000 --bind 127.0.0.1
+            然後用 Chrome 開 http://localhost:8000
+-->
+<style>
+  :root {
+    --bg: #101317;
+    --bar: #1b2027;
+    --text: #ffffff;
+    --btn: #ffffff;
+    --btn-text: #111111;
+    --primary: #ffd400;
+    --on: #1d7f36;
+    --save: #1d7f36;
+    --focus: #29b6f6;
+    --font: "PingFang HK", "PingFang TC", "Heiti TC", "Microsoft JhengHei", "Noto Sans CJK TC", "Noto Sans TC", "WenQuanYi Zen Hei", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: var(--bg); color: var(--text);
+    font-family: var(--font); font-size: 28px; line-height: 1.4;
+  }
+  body.idle, body.idle * { cursor: none !important; }
+  .hidden { display: none !important; }
+
+  button {
+    font: inherit; font-size: 30px; font-weight: 800; line-height: 1.2;
+    min-height: 84px; padding: 10px 30px;
+    border: 4px solid #000; border-radius: 18px;
+    background: var(--btn); color: var(--btn-text);
+    cursor: pointer; touch-action: manipulation;
+  }
+  button:hover { filter: brightness(0.94); }
+  button:active { transform: translateY(2px); }
+  button:focus-visible { outline: 6px solid var(--focus); outline-offset: 3px; }
+  button:disabled { opacity: 0.45; cursor: default; filter: none; transform: none; }
+
+  #app { display: grid; grid-template-rows: auto 1fr auto; height: 100vh; }
+  #app.no-controls #topbar, #app.no-controls #controls { display: none; }
+
+  #topbar, #controls {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 16px;
+    padding: 12px 20px; background: var(--bar);
+  }
+  #controls { justify-content: center; }
+  .spacer { flex: 1; }
+  #themeTitle { display: flex; align-items: baseline; gap: 16px; min-width: 7em; justify-content: center; }
+  #themeName { font-size: 52px; font-weight: 900; letter-spacing: 2px; white-space: nowrap; }
+  #themeCount { font-size: 28px; color: #c9d1d9; white-space: nowrap; }
+
+  #shootBtn { background: var(--primary); font-size: 48px; min-height: 104px; padding: 8px 64px; }
+  .toggle.on { background: var(--on); color: #fff; }
+
+  #stageWrap { position: relative; min-height: 0; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  #stage { display: block; background: #000; box-shadow: 0 8px 40px rgba(0,0,0,0.55); }
+
+  #hint {
+    position: absolute; top: 28px; left: 50%; transform: translateX(-50%);
+    max-width: 90%; text-align: center;
+    background: rgba(255,255,255,0.95); color: #1a1a1a;
+    font-size: 46px; font-weight: 900; padding: 16px 44px; border-radius: 999px;
+    box-shadow: 0 8px 28px rgba(0,0,0,0.4);
+    opacity: 0; transition: opacity 0.6s ease; pointer-events: none;
+  }
+  #hint.show { opacity: 1; }
+
+  #smileMeter {
+    position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 18px; white-space: nowrap;
+    background: rgba(0,0,0,0.75); color: #fff; font-size: 34px; font-weight: 800;
+    padding: 12px 30px; border-radius: 22px; pointer-events: none;
+  }
+  #smileMeter .bar { width: 300px; height: 30px; background: #444; border-radius: 15px; overflow: hidden; border: 3px solid #fff; }
+  #smileBar { height: 100%; width: 0%; background: var(--primary); transition: width 0.1s linear; }
+
+  /* ---------- 覆蓋層 ---------- */
+  .overlay { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; }
+
+  #welcome, #loading { background: radial-gradient(circle at 50% 30%, #243049 0%, #0d1117 70%); flex-direction: column; gap: 28px; text-align: center; padding: 32px; }
+  #welcome h1 { font-size: 76px; margin: 0; letter-spacing: 4px; }
+  #welcome .sub { font-size: 36px; color: #e6edf3; margin: 0; }
+  .privacy { font-size: 32px; background: rgba(29,127,54,0.25); border: 3px solid #3fb950; border-radius: 18px; padding: 12px 28px; }
+  #startBtn { background: var(--primary); font-size: 60px; min-height: 130px; padding: 10px 96px; border-radius: 28px; }
+  .keys { font-size: 28px; color: #c9d1d9; max-width: 1200px; }
+  .keys kbd, .panel kbd {
+    display: inline-block; min-width: 1.6em; padding: 2px 12px; margin: 0 4px;
+    border: 3px solid currentColor; border-radius: 10px; font-family: inherit; font-weight: 800;
+  }
+  #mpStatus { font-size: 28px; color: #c9d1d9; }
+  .spinner { width: 110px; height: 110px; border: 14px solid rgba(255,255,255,0.2); border-top-color: var(--primary); border-radius: 50%; animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #loadingText { font-size: 44px; font-weight: 800; margin: 0; }
+  #loadingSub { font-size: 32px; color: #e6edf3; margin: 0; }
+
+  .panel {
+    background: #ffffff; color: #111; border-radius: 28px;
+    padding: 36px 48px; width: min(1150px, 94vw); max-height: 92vh; overflow: auto;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+  }
+  .panel h2 { font-size: 48px; margin: 0 0 12px; }
+  .panel p { margin: 8px 0; font-size: 32px; }
+  .panel ol { margin: 12px 0 20px; padding-left: 1.6em; }
+  .panel li { font-size: 32px; margin: 10px 0; }
+  .panel .tech { font-size: 28px; color: #555; word-break: break-all; }
+  .panel .row { display: flex; gap: 20px; flex-wrap: wrap; margin-top: 20px; }
+  .btn-main { background: var(--primary); }
+  .btn-go { background: var(--save); color: #fff; }
+  #errorBox { background: rgba(0,0,0,0.82); z-index: 70; }
+  #errorTitle { color: #b71c1c; }
+
+  #countdown { z-index: 55; background: rgba(0,0,0,0.22); pointer-events: none; flex-direction: column; }
+  #countNum {
+    font-size: min(64vh, 56vw); font-weight: 900; line-height: 1; color: #fff;
+    -webkit-text-stroke: 14px #000; paint-order: stroke fill;
+    text-shadow: 0 0 60px rgba(0,0,0,0.7);
+  }
+  #countNum.word { font-size: min(24vh, 17vw); color: var(--primary); }
+  .pop { animation: pop 0.45s cubic-bezier(.2,1.4,.4,1); }
+  @keyframes pop { from { transform: scale(1.6); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+
+  #flash { z-index: 60; background: #fff; opacity: 0; pointer-events: none; }
+  #flash.go { animation: flash 0.7s ease-out; }
+  @keyframes flash { 0% { opacity: 1; } 100% { opacity: 0; } }
+
+  #preview { z-index: 58; background: rgba(8,10,14,0.97); flex-direction: column; gap: 22px; padding: 20px; }
+  #previewTitle { font-size: 44px; font-weight: 900; margin: 0; }
+  #previewBox canvas { display: block; max-width: 92vw; max-height: calc(100vh - 290px); width: auto; height: auto; border: 6px solid #fff; border-radius: 10px; }
+  #preview .row { display: flex; gap: 36px; flex-wrap: wrap; justify-content: center; }
+  #saveBtn, #retakeBtn { font-size: 48px; min-height: 120px; padding: 10px 60px; border-radius: 26px; }
+  #saveBtn { background: var(--save); color: #fff; }
+
+  #settings { z-index: 65; justify-content: flex-end; background: rgba(0,0,0,0.35); }
+  #settings .panel { height: 100vh; max-height: 100vh; width: min(720px, 96vw); border-radius: 0; padding: 28px 36px; }
+  .field { margin: 22px 0; }
+  .field > label, .field > .label { display: block; font-size: 32px; font-weight: 800; margin-bottom: 10px; }
+  .field input[type=text], .field select {
+    width: 100%; font: inherit; font-size: 34px; padding: 12px 18px;
+    border: 4px solid #333; border-radius: 14px; background: #fff; color: #111;
+  }
+  .field input[type=text]:focus, .field select:focus { outline: 5px solid var(--focus); }
+  .field .inline { display: flex; gap: 12px; }
+  .field .inline input { flex: 1; }
+  .seg { display: flex; flex-wrap: wrap; gap: 12px; }
+  .seg button { min-height: 76px; font-size: 30px; background: #eee; border-color: #888; }
+  .seg button.sel { background: #0d47a1; color: #fff; border-color: #000; }
+  .note { font-size: 28px; color: #444; }
+  .keylist { font-size: 28px; line-height: 2; }
+
+  #toast {
+    position: fixed; left: 50%; bottom: 150px; transform: translateX(-50%); z-index: 90;
+    background: var(--save); color: #fff; font-size: 38px; font-weight: 800;
+    padding: 18px 40px; border-radius: 22px; box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    opacity: 0; transition: opacity 0.4s; pointer-events: none; text-align: center;
+  }
+  #toast.show { opacity: 1; }
+  #toast.warn { background: #b71c1c; }
+
+  #video { position: fixed; left: 0; top: 0; width: 2px; height: 2px; opacity: 0; pointer-events: none; }
+</style>
+</head>
+<body>
+
+<div id="app">
+  <header id="topbar">
+    <button id="prevBtn" type="button">◀ 上一個</button>
+    <div id="themeTitle"><span id="themeName">中秋</span><span id="themeCount">1 / 7</span></div>
+    <button id="nextBtn" type="button">下一個 ▶</button>
+    <div class="spacer"></div>
+    <button id="settingsBtn" type="button">⚙ 設定</button>
+    <button id="fsBtn" type="button">⛶ 全螢幕</button>
+  </header>
+
+  <main id="stageWrap">
+    <canvas id="stage" width="1920" height="1080"></canvas>
+    <div id="hint"></div>
+    <div id="smileMeter" class="hidden"><span id="smileText">😊 笑一笑就會自動影相</span><div class="bar"><div id="smileBar"></div></div></div>
+  </main>
+
+  <footer id="controls">
+    <button id="hatBtn" type="button">頭飾：兔仔耳</button>
+    <button id="filterBtn" type="button" class="hidden">濾鏡：泛黃</button>
+    <button id="shootBtn" type="button">📷 影相</button>
+    <button id="autoBtn" type="button" class="toggle">😊 笑一笑自動影相：關</button>
+  </footer>
+</div>
+
+<!-- 歡迎畫面 -->
+<div id="welcome" class="overlay">
+  <h1>長者節日 AR 影相框</h1>
+  <p class="sub">由工作員操作，長者望住螢幕影相就得</p>
+  <div class="privacy">🔒 所有影像只喺呢部電腦處理，唔會上載任何資料</div>
+  <button id="startBtn" type="button">開始 ▶</button>
+  <div id="mpStatus">臉部偵測：載入中……</div>
+  <div class="keys">
+    <kbd>空白鍵</kbd>影相　<kbd>←</kbd><kbd>→</kbd>轉主題　<kbd>S</kbd>儲存　<kbd>F</kbd>全螢幕<br>
+    <kbd>H</kbd>轉頭飾　<kbd>A</kbd>笑一笑自動影相　<kbd>C</kbd>隱藏／顯示按鈕　<kbd>Esc</kbd>取消
+  </div>
+</div>
+
+<!-- 載入中 -->
+<div id="loading" class="overlay hidden">
+  <div class="spinner"></div>
+  <p id="loadingText">正在開啟鏡頭……</p>
+  <p id="loadingSub">如果 Chrome 問你「使用相機」，請按「允許」</p>
+</div>
+
+<!-- 錯誤提示 -->
+<div id="errorBox" class="overlay hidden">
+  <div class="panel" role="alertdialog" aria-labelledby="errorTitle">
+    <h2 id="errorTitle">出現問題</h2>
+    <p id="errorMsg"></p>
+    <ol id="errorSteps"></ol>
+    <p id="errorTech" class="tech"></p>
+    <div class="row" id="errorButtons"></div>
+  </div>
+</div>
+
+<!-- 倒數 -->
+<div id="countdown" class="overlay hidden"><div id="countNum">3</div></div>
+
+<!-- 閃光 -->
+<div id="flash" class="overlay"></div>
+
+<!-- 相片預覽 -->
+<div id="preview" class="overlay hidden">
+  <p id="previewTitle">影好喇！工作員請揀：</p>
+  <div id="previewBox"></div>
+  <div class="row">
+    <button id="saveBtn" type="button">💾 儲存相片（S）</button>
+    <button id="retakeBtn" type="button">🔄 再影過（空白鍵）</button>
+  </div>
+</div>
+
+<!-- 設定 -->
+<div id="settings" class="overlay hidden">
+  <div class="panel" role="dialog" aria-labelledby="settingsTitle">
+    <h2 id="settingsTitle">⚙ 設定</h2>
+    <div class="field">
+      <label for="actName">活動名稱（印喺相片底部）</label>
+      <input id="actName" type="text" maxlength="40" autocomplete="off">
+    </div>
+    <div class="field">
+      <label for="actDate">日期（留空就唔顯示）</label>
+      <div class="inline"><input id="actDate" type="text" maxlength="30" autocomplete="off"><button id="todayBtn" type="button">今日</button></div>
+    </div>
+    <div class="field"><span class="label">懷舊主題濾鏡</span><div class="seg" id="segFilter"></div></div>
+    <div class="field"><span class="label">笑一笑自動影相：笑容要幾明顯</span><div class="seg" id="segSmile"></div></div>
+    <div class="field"><span class="label">倒數讀出聲（廣東話）</span><div class="seg" id="segVoice"></div></div>
+    <div class="field"><span class="label">影相「咔嚓」聲</span><div class="seg" id="segShutter"></div></div>
+    <div class="field">
+      <label for="camSelect">使用邊個鏡頭</label>
+      <select id="camSelect"></select>
+      <p class="note">預設會揀 MacBook 內置鏡頭（FaceTime）。</p>
+    </div>
+    <div class="field">
+      <span class="label">鍵盤快捷鍵</span>
+      <div class="keylist">
+        <kbd>空白鍵</kbd> 影相（預覽時＝再影過）<br>
+        <kbd>←</kbd> <kbd>→</kbd> 轉主題　<kbd>1</kbd>–<kbd>7</kbd> 直接揀主題<br>
+        <kbd>S</kbd> 儲存相片　<kbd>F</kbd> 全螢幕<br>
+        <kbd>H</kbd> 轉頭飾（包括「唔戴」）　<kbd>V</kbd> 懷舊濾鏡<br>
+        <kbd>A</kbd> 笑一笑自動影相 開／關<br>
+        <kbd>C</kbd> 隱藏／顯示按鈕（接電視時畫面更大）<br>
+        <kbd>Esc</kbd> 取消倒數／關閉視窗
+      </div>
+    </div>
+    <div class="row"><button id="closeSettings" type="button" class="btn-main">完成</button></div>
+  </div>
+</div>
+
+<div id="toast"></div>
+<video id="video" playsinline muted></video>
+
+<script type="module">
+'use strict';
+
+/* =========================================================
+   基本設定
+   ========================================================= */
+const MP_VERSION = '0.10.21';
+const MP_BASE = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VERSION}`;
+const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
+const MAX_FACES = 6;
+const STORE_KEY = 'elderlyArPhotoFrame.v1';
+
+const SMILE_LEVELS = [
+  { id: 'easy', name: '少少笑都得', th: 0.3 },
+  { id: 'normal', name: '普通', th: 0.45 },
+  { id: 'hard', name: '要好明顯', th: 0.6 },
+];
+
+const $ = (id) => document.getElementById(id);
+const els = {
+  app: $('app'), stage: $('stage'), stageWrap: $('stageWrap'), video: $('video'),
+  themeName: $('themeName'), themeCount: $('themeCount'),
+  prevBtn: $('prevBtn'), nextBtn: $('nextBtn'), settingsBtn: $('settingsBtn'), fsBtn: $('fsBtn'),
+  hatBtn: $('hatBtn'), filterBtn: $('filterBtn'), shootBtn: $('shootBtn'), autoBtn: $('autoBtn'),
+  hint: $('hint'), smileMeter: $('smileMeter'), smileText: $('smileText'), smileBar: $('smileBar'),
+  welcome: $('welcome'), startBtn: $('startBtn'), mpStatus: $('mpStatus'),
+  loading: $('loading'), loadingText: $('loadingText'), loadingSub: $('loadingSub'),
+  errorBox: $('errorBox'), errorTitle: $('errorTitle'), errorMsg: $('errorMsg'), errorSteps: $('errorSteps'),
+  errorTech: $('errorTech'), errorButtons: $('errorButtons'),
+  countdown: $('countdown'), countNum: $('countNum'), flash: $('flash'),
+  preview: $('preview'), previewBox: $('previewBox'), saveBtn: $('saveBtn'), retakeBtn: $('retakeBtn'),
+  settings: $('settings'), actName: $('actName'), actDate: $('actDate'), todayBtn: $('todayBtn'),
+  segFilter: $('segFilter'), segSmile: $('segSmile'), segVoice: $('segVoice'), segShutter: $('segShutter'),
+  camSelect: $('camSelect'), closeSettings: $('closeSettings'), toast: $('toast'),
+};
+const stageCtx = els.stage.getContext('2d');
+const photoCanvas = document.createElement('canvas');
+const photoCtx = photoCanvas.getContext('2d');
+
+/* ---------- 設定（只存喺本機瀏覽器） ---------- */
+const DEFAULTS = { activityName: '節日同樂日', vintageFilter: 'sepia', smileLevel: 'normal', voice: true, shutter: true, headwear: {}, cameraId: '' };
+const settings = loadSettings();
+let dateText = todayText();
+
+function loadSettings() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORE_KEY) || '{}');
+    return { ...DEFAULTS, ...saved, headwear: { ...(saved.headwear || {}) } };
+  } catch (e) {
+    return { ...DEFAULTS, headwear: {} };
+  }
+}
+function saveSettings() {
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(settings)); } catch (e) { /* 私隱模式等情況可以忽略 */ }
+}
+function todayText() {
+  const d = new Date();
+  return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
+}
+function captionText() {
+  return [settings.activityName.trim(), dateText.trim()].filter(Boolean).join('　　');
+}
+
+/* ---------- 程式狀態 ---------- */
+const app = {
+  phase: 'welcome',          // welcome | starting | live | countdown | preview
+  modal: null,               // null | 'error' | 'settings'
+  themeIndex: 0,
+  autoSmile: false,
+  controlsHidden: false,
+  stream: null,
+  landmarker: null,
+  mpStatus: 'loading',       // loading | ready | failed | skipped
+  mpError: null,
+  tracks: [],
+  nextTrackId: 1,
+  lastVideoTime: -1,
+  lastFrameAt: 0,
+  detectErrors: 0,
+  brightness: 128,
+  lastBrightAt: 0,
+  noFaceSince: 0,
+  hintShown: '',
+  hintCandidate: '',
+  hintCandidateSince: 0,
+  smileStart: 0,
+  smileLastAbove: 0,
+  smileCooldownUntil: 0,
+  countdownToken: 0,
+  photoSaved: false,
+  photoTime: null,
+};
+
+/* =========================================================
+   繪圖小工具
+   ========================================================= */
+const TAU = Math.PI * 2;
+const FONT_SANS = '"PingFang HK","PingFang TC","Heiti TC","Microsoft JhengHei","Noto Sans CJK TC","Noto Sans TC","WenQuanYi Zen Hei",sans-serif';
+const FONT_KAI = '"BiauKaiHK","BiauKaiTC","BiauKai","Kaiti TC","STKaiti","DFKai-SB","TW-Kai",' + FONT_SANS;
+
+function rng(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function seeded(seed, n, k = 5) {
+  const r = rng(seed);
+  return Array.from({ length: n }, () => Array.from({ length: k }, r));
+}
+const RND = {
+  stars: seeded(7, 150), confetti: seeded(21, 260), snow: seeded(33, 55),
+  flakes: seeded(44, 140), leaves: seeded(55, 10), stains: seeded(66, 9), gold: seeded(77, 40),
+};
+
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+function angleDiff(a, b) { let d = a - b; while (d > Math.PI) d -= TAU; while (d < -Math.PI) d += TAU; return d; }
+
+function frameLayout(W, H, side, top, bottom) {
+  const u = Math.min(W, H) / 100;
+  const L = { W, H, u, side: side * u, top: top * u, bottom: bottom * u };
+  L.ix = L.side; L.iy = L.top; L.iw = W - 2 * L.side; L.ih = H - L.top - L.bottom;
+  L.by = L.iy + L.ih;           // 相片區底部
+  L.rx = L.ix + L.iw;           // 相片區右邊
+  return L;
+}
+function inInner(L, x, y, pad = 0) {
+  return x > L.ix - pad && x < L.rx + pad && y > L.iy - pad && y < L.by + pad;
+}
+function inTextZone(L, x, y) {        // 標題同底部文字附近唔放細裝飾，免得遮字
+  return (y < L.iy && Math.abs(x - L.W / 2) < L.W * 0.2) || (y > L.by && Math.abs(x - L.W / 2) < L.W * 0.36);
+}
+function fillBands(ctx, L, style) {
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0, 0, L.W, L.H); ctx.rect(L.ix, L.iy, L.iw, L.ih);
+  ctx.fillStyle = style; ctx.fill('evenodd');
+  ctx.restore();
+}
+function innerLine(ctx, L, color, width, gap) {
+  ctx.save();
+  ctx.strokeStyle = color; ctx.lineWidth = width;
+  const o = gap + width / 2;
+  ctx.strokeRect(L.ix - o, L.iy - o, L.iw + 2 * o, L.ih + 2 * o);
+  ctx.restore();
+}
+function roundRectPath(ctx, x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function setFont(ctx, size, family, weight) { ctx.font = `${weight} ${Math.round(size)}px ${family}`; }
+function drawText(ctx, text, x, y, o) {
+  const family = o.family || FONT_SANS, weight = o.weight || '800';
+  ctx.save();
+  ctx.textAlign = o.align || 'center'; ctx.textBaseline = 'middle';
+  let size = o.size;
+  setFont(ctx, size, family, weight);
+  const w = ctx.measureText(text).width;
+  if (o.maxW && w > o.maxW) { size = size * o.maxW / w; setFont(ctx, size, family, weight); }
+  if (o.shadow) { ctx.shadowColor = o.shadow; ctx.shadowBlur = size * 0.18; ctx.shadowOffsetY = size * 0.05; }
+  if (o.stroke) {
+    ctx.lineJoin = 'round'; ctx.lineWidth = o.strokeW || size * 0.14; ctx.strokeStyle = o.stroke;
+    ctx.strokeText(text, x, y);
+    ctx.shadowColor = 'transparent';
+  }
+  ctx.fillStyle = o.fill; ctx.fillText(text, x, y);
+  ctx.restore();
+}
+function drawCaption(ctx, L, fill, stroke, family) {
+  const text = captionText();
+  if (!text) return;
+  drawText(ctx, text, L.W / 2, L.H - L.bottom / 2, {
+    size: 4.6 * L.u, family: family || FONT_SANS, weight: '800', fill,
+    stroke, strokeW: 0.4 * L.u, maxW: L.W - 26 * L.u,
+  });
+}
+function drawHeaderText(ctx, L, text, fill, stroke) {
+  drawText(ctx, text, L.W / 2, L.top / 2 + 0.3 * L.u, {
+    size: 6.2 * L.u, family: FONT_KAI, weight: '800', fill, stroke,
+    strokeW: 0.55 * L.u, shadow: 'rgba(0,0,0,0.35)', maxW: L.W * 0.5,
+  });
+}
+
+/* ---------- 共用小圖案 ---------- */
+function drawStar4(ctx, x, y, r) {
+  ctx.beginPath();
+  ctx.moveTo(x, y - r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.quadraticCurveTo(x, y, x, y + r);
+  ctx.quadraticCurveTo(x, y, x - r, y);
+  ctx.quadraticCurveTo(x, y, x, y - r);
+  ctx.fill();
+}
+function drawLeaf(ctx, x, y, len, ang, color) {
+  ctx.save();
+  ctx.translate(x, y); ctx.rotate(ang);
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.quadraticCurveTo(len * 0.5, -len * 0.34, len, 0);
+  ctx.quadraticCurveTo(len * 0.5, len * 0.34, 0, 0);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = Math.max(1, len * 0.03);
+  ctx.beginPath(); ctx.moveTo(len * 0.05, 0); ctx.lineTo(len * 0.9, 0); ctx.stroke();
+  ctx.restore();
+}
+function drawBerry(ctx, x, y, r, color) {
+  const g = ctx.createRadialGradient(x - r * 0.35, y - r * 0.35, r * 0.1, x, y, r);
+  g.addColorStop(0, '#FF9E9E'); g.addColorStop(1, color);
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill();
+}
+function drawPearl(ctx, x, y, r) {
+  const g = ctx.createRadialGradient(x - r * 0.35, y - r * 0.35, r * 0.1, x, y, r);
+  g.addColorStop(0, '#FFFFFF'); g.addColorStop(1, '#C9BFB0');
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill();
+}
+function drawCoin(ctx, x, y, r) {
+  ctx.save();
+  const g = ctx.createRadialGradient(x - r * 0.3, y - r * 0.3, r * 0.1, x, y, r);
+  g.addColorStop(0, '#FFF3B0'); g.addColorStop(0.6, '#F2B81C'); g.addColorStop(1, '#A87400');
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill();
+  ctx.strokeStyle = '#8A5A00'; ctx.lineWidth = r * 0.1;
+  ctx.beginPath(); ctx.arc(x, y, r * 0.78, 0, TAU); ctx.stroke();
+  ctx.fillStyle = '#7A0616';
+  ctx.fillRect(x - r * 0.26, y - r * 0.26, r * 0.52, r * 0.52);
+  ctx.restore();
+}
+function headbandPath(ctx, s) {
+  ctx.beginPath();
+  ctx.ellipse(0, 0.16 * s, 0.53 * s, 0.42 * s, 0, Math.PI * 1.1, Math.PI * 1.9);
+}
+
+/* ---------- 中秋 ---------- */
+function drawMoon(ctx, x, y, r) {
+  ctx.save();
+  const glow = ctx.createRadialGradient(x, y, r * 0.8, x, y, r * 1.9);
+  glow.addColorStop(0, 'rgba(255,236,160,0.55)'); glow.addColorStop(1, 'rgba(255,236,160,0)');
+  ctx.fillStyle = glow;
+  ctx.beginPath(); ctx.arc(x, y, r * 1.9, 0, TAU); ctx.fill();
+  const g = ctx.createRadialGradient(x - r * 0.3, y - r * 0.3, r * 0.1, x, y, r);
+  g.addColorStop(0, '#FFFBE0'); g.addColorStop(0.7, '#FBE7A1'); g.addColorStop(1, '#F2CF6B');
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill();
+  ctx.fillStyle = 'rgba(206,168,84,0.33)';
+  for (const [dx, dy, rr] of [[-0.35, -0.1, 0.18], [0.25, 0.3, 0.14], [0.12, -0.42, 0.1], [-0.1, 0.46, 0.08], [0.48, -0.05, 0.07]]) {
+    ctx.beginPath(); ctx.arc(x + dx * r, y + dy * r, rr * r, 0, TAU); ctx.fill();
+  }
+  ctx.restore();
+}
+function drawCloud(ctx, x, y, s) {
+  ctx.save();
+  ctx.beginPath();
+  for (const [dx, dy, r] of [[-0.62, 0.02, 0.3], [-0.26, -0.18, 0.4], [0.18, -0.12, 0.36], [0.56, 0.03, 0.28], [0, 0.08, 0.34]]) {
+    ctx.moveTo(x + dx * s + r * s, y + dy * s);
+    ctx.arc(x + dx * s, y + dy * s, r * s, 0, TAU);
+  }
+  ctx.fillStyle = 'rgba(238,243,255,0.95)';
+  ctx.shadowColor = 'rgba(0,0,0,0.3)'; ctx.shadowBlur = s * 0.12;
+  ctx.fill();
+  ctx.restore();
+  ctx.save();
+  ctx.strokeStyle = 'rgba(150,172,220,0.9)'; ctx.lineWidth = s * 0.05; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.arc(x - 0.26 * s, y - 0.1 * s, 0.17 * s, Math.PI * 0.9, Math.PI * 2.1); ctx.stroke();
+  ctx.beginPath(); ctx.arc(x + 0.2 * s, y - 0.04 * s, 0.13 * s, Math.PI * 1.0, Math.PI * 2.2); ctx.stroke();
+  ctx.restore();
+}
+function drawLantern(ctx, x, y, len, r, sway) {
+  ctx.save();
+  ctx.translate(x, y); ctx.rotate(sway);
+  ctx.strokeStyle = '#D4A72C'; ctx.lineWidth = Math.max(2, r * 0.06);
+  ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, len); ctx.stroke();
+  ctx.translate(0, len);
+  const capH = r * 0.25, capW = r * 0.8, bh = r * 1.0, cy = capH + bh;
+  ctx.save();
+  ctx.shadowColor = 'rgba(255,140,40,0.85)'; ctx.shadowBlur = r * 0.9;
+  const g = ctx.createRadialGradient(0, cy, r * 0.1, 0, cy, r * 1.25);
+  g.addColorStop(0, '#FFD36B'); g.addColorStop(0.45, '#E0262B'); g.addColorStop(1, '#8E0E12');
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.ellipse(0, cy, r * 1.2, bh, 0, 0, TAU); ctx.fill();
+  ctx.restore();
+  ctx.strokeStyle = 'rgba(120,10,10,0.55)'; ctx.lineWidth = Math.max(1.5, r * 0.05);
+  for (const k of [0.33, 0.68]) { ctx.beginPath(); ctx.ellipse(0, cy, r * 1.2 * k, bh, 0, 0, TAU); ctx.stroke(); }
+  ctx.fillStyle = '#E8B830';
+  roundRectPath(ctx, -capW / 2, 0, capW, capH * 1.2, capH * 0.3); ctx.fill();
+  roundRectPath(ctx, -capW / 2, cy + bh - capH * 0.2, capW, capH * 1.2, capH * 0.3); ctx.fill();
+  ctx.strokeStyle = '#E8B830'; ctx.lineWidth = Math.max(1.5, r * 0.06);
+  const ty = cy + bh + capH;
+  for (let i = -2; i <= 2; i++) { ctx.beginPath(); ctx.moveTo(i * r * 0.07, ty); ctx.lineTo(i * r * 0.1, ty + r * 0.9); ctx.stroke(); }
+  ctx.restore();
+}
+function drawRabbit(ctx, x, y, s) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.strokeStyle = 'rgba(110,120,165,0.85)'; ctx.lineWidth = s * 0.03;
+  for (const [ex, rot] of [[0.24, -0.25], [0.46, 0.22]]) {
+    ctx.save();
+    ctx.translate(ex * s, -1.12 * s); ctx.rotate(rot);
+    ctx.fillStyle = '#FFFFFF';
+    ctx.beginPath(); ctx.ellipse(0, -0.28 * s, 0.1 * s, 0.32 * s, 0, 0, TAU); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#FFC1D3';
+    ctx.beginPath(); ctx.ellipse(0, -0.26 * s, 0.045 * s, 0.22 * s, 0, 0, TAU); ctx.fill();
+    ctx.restore();
+  }
+  ctx.fillStyle = '#FFFFFF';
+  ctx.beginPath(); ctx.ellipse(0, -0.45 * s, 0.55 * s, 0.45 * s, 0, 0, TAU); ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.arc(-0.55 * s, -0.35 * s, 0.13 * s, 0, TAU); ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.arc(0.36 * s, -0.95 * s, 0.32 * s, 0, TAU); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#2B2B3A';
+  ctx.beginPath(); ctx.arc(0.49 * s, -1.0 * s, 0.045 * s, 0, TAU); ctx.fill();
+  ctx.fillStyle = '#FF8FB1';
+  ctx.beginPath(); ctx.arc(0.67 * s, -0.9 * s, 0.035 * s, 0, TAU); ctx.fill();
+  ctx.fillStyle = 'rgba(255,150,180,0.55)';
+  ctx.beginPath(); ctx.ellipse(0.43 * s, -0.84 * s, 0.07 * s, 0.045 * s, 0, 0, TAU); ctx.fill();
+  ctx.fillStyle = '#FFFFFF';
+  ctx.beginPath(); ctx.ellipse(0.3 * s, -0.07 * s, 0.14 * s, 0.08 * s, 0, 0, TAU); ctx.fill(); ctx.stroke();
+  ctx.restore();
+}
+
+/* ---------- 新年 ---------- */
+function drawCouplet(ctx, x, y, w, text) {
+  const chars = [...text], step = w * 1.05, h = chars.length * step + w * 0.5;
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.35)'; ctx.shadowBlur = w * 0.25; ctx.shadowOffsetY = w * 0.06;
+  const g = ctx.createLinearGradient(x, 0, x + w, 0);
+  g.addColorStop(0, '#B3121F'); g.addColorStop(0.5, '#D7263D'); g.addColorStop(1, '#B3121F');
+  ctx.fillStyle = g; ctx.fillRect(x, y, w, h);
+  ctx.restore();
+  ctx.save();
+  ctx.fillStyle = 'rgba(255,215,90,0.55)';
+  for (const [a, b, c] of RND.gold) { ctx.beginPath(); ctx.arc(x + a * w, y + b * h, (0.02 + c * 0.03) * w, 0, TAU); ctx.fill(); }
+  ctx.strokeStyle = '#F2C14E'; ctx.lineWidth = w * 0.05;
+  ctx.strokeRect(x + w * 0.09, y + w * 0.09, w - w * 0.18, h - w * 0.18);
+  ctx.restore();
+  chars.forEach((ch, i) => drawText(ctx, ch, x + w / 2, y + w * 0.25 + step * (i + 0.5), {
+    size: w * 0.7, family: FONT_KAI, weight: '800', fill: '#FFD966', stroke: '#6E0510', strokeW: w * 0.07,
+  }));
+  ctx.save();
+  ctx.strokeStyle = '#F2C14E'; ctx.lineWidth = Math.max(1.5, w * 0.03);
+  for (let i = -2; i <= 2; i++) { ctx.beginPath(); ctx.moveTo(x + w / 2 + i * w * 0.06, y + h); ctx.lineTo(x + w / 2 + i * w * 0.09, y + h + w * 0.6); ctx.stroke(); }
+  ctx.restore();
+}
+function drawBlossom(ctx, x, y, r) {
+  ctx.fillStyle = '#FF8FAB';
+  for (let i = 0; i < 5; i++) {
+    const a = i * TAU / 5 - Math.PI / 2;
+    ctx.beginPath(); ctx.arc(x + Math.cos(a) * r * 0.55, y + Math.sin(a) * r * 0.55, r * 0.48, 0, TAU); ctx.fill();
+  }
+  ctx.fillStyle = '#FFD166';
+  ctx.beginPath(); ctx.arc(x, y, r * 0.26, 0, TAU); ctx.fill();
+}
+function drawPlumBranch(ctx, x, y, s, flip) {
+  ctx.save();
+  ctx.translate(x, y); ctx.scale(flip ? -1 : 1, 1);
+  ctx.strokeStyle = '#4A2C1A'; ctx.lineCap = 'round';
+  ctx.lineWidth = s * 0.06;
+  ctx.beginPath(); ctx.moveTo(0, 0); ctx.bezierCurveTo(s * 0.2, -s * 0.3, s * 0.1, -s * 0.6, s * 0.45, -s * 0.9); ctx.stroke();
+  ctx.lineWidth = s * 0.035;
+  ctx.beginPath(); ctx.moveTo(s * 0.12, -s * 0.35); ctx.quadraticCurveTo(s * 0.4, -s * 0.4, s * 0.62, -s * 0.55); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(s * 0.2, -s * 0.62); ctx.quadraticCurveTo(s * 0.05, -s * 0.8, s * 0.1, -s * 1.0); ctx.stroke();
+  for (const [bx, by, br] of [[0.45, -0.9, 0.09], [0.62, -0.55, 0.08], [0.1, -1.0, 0.08], [0.32, -0.44, 0.07], [0.17, -0.7, 0.065], [0.05, -0.2, 0.06]]) {
+    drawBlossom(ctx, bx * s, by * s, br * s);
+  }
+  ctx.restore();
+}
+
+/* ---------- 生日 ---------- */
+const PARTY_COLORS = ['#FF4D6D', '#FFB703', '#2EC4B6', '#8338EC', '#3A86FF'];
+function drawBunting(ctx, x1, x2, y, sag, flagW, flagH) {
+  ctx.save();
+  ctx.strokeStyle = '#5B3A29'; ctx.lineWidth = Math.max(2, flagW * 0.06);
+  ctx.beginPath(); ctx.moveTo(x1, y); ctx.quadraticCurveTo((x1 + x2) / 2, y + sag * 2, x2, y); ctx.stroke();
+  const n = Math.max(2, Math.floor((x2 - x1) / (flagW * 1.15)));
+  const pt = (t) => ({ x: x1 + (x2 - x1) * t, y: y + 4 * sag * t * (1 - t) });
+  for (let i = 0; i < n; i++) {
+    const p0 = pt((i + 0.1) / n), p1 = pt((i + 0.9) / n);
+    ctx.fillStyle = PARTY_COLORS[i % PARTY_COLORS.length];
+    ctx.beginPath();
+    ctx.moveTo(p0.x, p0.y); ctx.lineTo(p1.x, p1.y); ctx.lineTo((p0.x + p1.x) / 2, (p0.y + p1.y) / 2 + flagH);
+    ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+}
+function drawBalloon(ctx, x, y, r, color, dark, stringLen) {
+  ctx.save();
+  ctx.strokeStyle = 'rgba(70,70,70,0.85)'; ctx.lineWidth = Math.max(1.5, r * 0.04);
+  const sy = y + r * 1.3;
+  ctx.beginPath(); ctx.moveTo(x, sy);
+  ctx.bezierCurveTo(x + r * 0.35, sy + stringLen * 0.3, x - r * 0.35, sy + stringLen * 0.65, x, sy + stringLen);
+  ctx.stroke();
+  const g = ctx.createRadialGradient(x - r * 0.35, y - r * 0.4, r * 0.05, x, y, r * 1.25);
+  g.addColorStop(0, 'rgba(255,255,255,0.95)'); g.addColorStop(0.22, color); g.addColorStop(1, dark);
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.ellipse(x, y, r, r * 1.18, 0, 0, TAU); ctx.fill();
+  ctx.fillStyle = dark;
+  ctx.beginPath(); ctx.moveTo(x, y + r * 1.14); ctx.lineTo(x - r * 0.13, y + r * 1.32); ctx.lineTo(x + r * 0.13, y + r * 1.32); ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+function drawPeach(ctx, x, y, r) {
+  drawLeaf(ctx, x - r * 0.1, y + r * 0.8, r * 0.95, Math.PI * 0.88, '#4CAF50');
+  drawLeaf(ctx, x + r * 0.1, y + r * 0.8, r * 0.95, Math.PI * 0.12, '#388E3C');
+  ctx.save();
+  const g = ctx.createRadialGradient(x - r * 0.25, y + r * 0.25, r * 0.1, x, y, r * 1.2);
+  g.addColorStop(0, '#FFF3E0'); g.addColorStop(0.5, '#FFC1A6'); g.addColorStop(1, '#F06292');
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.moveTo(x, y - r * 1.05);
+  ctx.bezierCurveTo(x + r * 0.9, y - r * 0.6, x + r * 1.12, y + r * 0.45, x, y + r * 0.95);
+  ctx.bezierCurveTo(x - r * 1.12, y + r * 0.45, x - r * 0.9, y - r * 0.6, x, y - r * 1.05);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(200,80,120,0.5)'; ctx.lineWidth = r * 0.05;
+  ctx.beginPath(); ctx.moveTo(x, y - r * 1.0); ctx.quadraticCurveTo(x - r * 0.28, y, x, y + r * 0.9); ctx.stroke();
+  ctx.restore();
+}
+function drawPlate(ctx, x, y, w) {
+  ctx.save();
+  ctx.fillStyle = '#FFFFFF'; ctx.strokeStyle = '#1565C0'; ctx.lineWidth = w * 0.03;
+  ctx.shadowColor = 'rgba(0,0,0,0.3)'; ctx.shadowBlur = w * 0.06;
+  ctx.beginPath(); ctx.ellipse(x, y, w / 2, w * 0.12, 0, 0, TAU); ctx.fill();
+  ctx.shadowColor = 'transparent'; ctx.stroke();
+  ctx.restore();
+}
+function drawCurlyStreamer(ctx, x, y, len, u, color, t) {
+  ctx.save();
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  const path = () => {
+    ctx.beginPath();
+    for (let d = 0; d <= len; d += u * 0.25) {
+      const px = x + Math.sin(d / (2.4 * u) * TAU + Math.sin(t * 1.3) * 0.6) * 1.1 * u * (0.4 + d / len);
+      d === 0 ? ctx.moveTo(px, y + d) : ctx.lineTo(px, y + d);
+    }
+  };
+  path(); ctx.strokeStyle = color; ctx.lineWidth = 0.6 * u; ctx.stroke();
+  path(); ctx.strokeStyle = 'rgba(255,255,255,0.45)'; ctx.lineWidth = 0.18 * u; ctx.stroke();
+  ctx.restore();
+}
+function drawWave(ctx, x1, y1, x2, y2, amp, wl, phase) {
+  const len = Math.hypot(x2 - x1, y2 - y1), nx = -(y2 - y1) / len, ny = (x2 - x1) / len;
+  const steps = Math.ceil(len / 6);
+  ctx.beginPath();
+  for (let i = 0; i <= steps; i++) {
+    const d = len * i / steps, off = Math.sin(d / wl * TAU + phase) * amp;
+    const px = x1 + (x2 - x1) * d / len + nx * off, py = y1 + (y2 - y1) * d / len + ny * off;
+    i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+  }
+  ctx.stroke();
+}
+function drawRainbowText(ctx, text, cx, cy, size) {
+  ctx.save();
+  setFont(ctx, size, FONT_KAI, '900');
+  ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
+  const chars = [...text], gap = size * 0.12;
+  const widths = chars.map((c) => ctx.measureText(c).width);
+  let x = cx - (widths.reduce((a, b) => a + b, 0) + gap * (chars.length - 1)) / 2;
+  chars.forEach((c, i) => {
+    ctx.lineJoin = 'round'; ctx.lineWidth = size * 0.16; ctx.strokeStyle = '#3A2A60';
+    ctx.strokeText(c, x, cy);
+    ctx.fillStyle = PARTY_COLORS[i % PARTY_COLORS.length]; ctx.fillText(c, x, cy);
+    x += widths[i] + gap;
+  });
+  ctx.restore();
+}
+
+/* ---------- 懷舊 ---------- */
+function decklePath(ctx, x, y, w, h, r) {
+  const edge = (x1, y1, x2, y2) => {
+    const len = Math.hypot(x2 - x1, y2 - y1), n = Math.max(2, Math.round(len / (r * 2)));
+    const dx = (x2 - x1) / n, dy = (y2 - y1) / n, seg = len / n, nx = dy / seg, ny = -dx / seg;
+    for (let i = 0; i < n; i++) {
+      const sx = x1 + dx * i, sy = y1 + dy * i;
+      ctx.quadraticCurveTo(sx + dx / 2 + nx * r * 0.9, sy + dy / 2 + ny * r * 0.9, sx + dx, sy + dy);
+    }
+  };
+  ctx.moveTo(x, y);
+  edge(x, y, x + w, y); edge(x + w, y, x + w, y + h); edge(x + w, y + h, x, y + h); edge(x, y + h, x, y);
+  ctx.closePath();
+}
+function vintageOverlay(ctx, W, H, t) {
+  const bw = settings.vintageFilter === 'bw';
+  const u = Math.min(W, H) / 100, R = Math.hypot(W, H) / 2;
+  const g = ctx.createRadialGradient(W / 2, H / 2, R * 0.42, W / 2, H / 2, R);
+  g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, bw ? 'rgba(0,0,0,0.6)' : 'rgba(62,36,10,0.6)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  // 舊菲林塵粒同花痕（每秒轉幾次，似舊電影）
+  const r = rng(Math.floor(t * 6) + 11);
+  ctx.fillStyle = 'rgba(35,25,15,0.35)';
+  for (let i = 0; i < 16; i++) { ctx.beginPath(); ctx.arc(r() * W, r() * H, (0.08 + r() * 0.25) * u, 0, TAU); ctx.fill(); }
+  ctx.fillStyle = 'rgba(255,250,235,0.3)';
+  for (let i = 0; i < 8; i++) { ctx.beginPath(); ctx.arc(r() * W, r() * H, (0.06 + r() * 0.18) * u, 0, TAU); ctx.fill(); }
+  ctx.strokeStyle = 'rgba(255,245,225,0.22)'; ctx.lineWidth = Math.max(1, u * 0.08);
+  for (let i = 0; i < 2; i++) {
+    if (r() < 0.55) { const x = r() * W; ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x + (r() - 0.5) * u * 2, H); ctx.stroke(); }
+  }
+}
+
+/* ---------- 重陽 ---------- */
+const CHRY = {
+  yellow: ['#E9A800', '#FFC81E', '#FFE27A', '#B97A00'],
+  orange: ['#DD6B1A', '#F5923A', '#FFC069', '#A04A0B'],
+  white: ['#E6E6E6', '#FFFFFF', '#FFF8DC', '#D9B24C'],
+  purple: ['#8E44AD', '#B06CD0', '#D7B4EA', '#6C2C8A'],
+};
+function drawChrysanthemum(ctx, x, y, r, pal) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.lineWidth = Math.max(1, r * 0.015); ctx.strokeStyle = 'rgba(0,0,0,0.15)';
+  for (const [n, len, col] of [[20, 1.0, pal[0]], [16, 0.78, pal[1]], [12, 0.55, pal[2]]]) {
+    ctx.fillStyle = col;
+    for (let i = 0; i < n; i++) {
+      ctx.save();
+      ctx.rotate(i * TAU / n + len * 1.3);
+      ctx.beginPath(); ctx.ellipse(r * len * 0.52, 0, r * len * 0.5, r * 0.085, 0, 0, TAU);
+      ctx.fill(); ctx.stroke();
+      ctx.restore();
+    }
+  }
+  ctx.fillStyle = pal[3];
+  ctx.beginPath(); ctx.arc(0, 0, r * 0.16, 0, TAU); ctx.fill();
+  ctx.restore();
+}
+function drawZhuyu(ctx, x, y, s, ang) {   // 茱萸：重陽插茱萸
+  ctx.save();
+  ctx.translate(x, y); ctx.rotate(ang);
+  ctx.strokeStyle = '#5D4037'; ctx.lineWidth = s * 0.04; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(0, 0); ctx.quadraticCurveTo(s * 0.3, -s * 0.1, s * 0.7, -s * 0.05); ctx.stroke();
+  drawLeaf(ctx, s * 0.25, -s * 0.06, s * 0.35, -0.9, '#43A047');
+  drawLeaf(ctx, s * 0.45, -s * 0.08, s * 0.3, 0.8, '#2E7D32');
+  for (const [bx, by] of [[0.62, -0.1], [0.7, -0.02], [0.77, -0.12], [0.66, 0.04], [0.56, -0.02]]) drawBerry(ctx, bx * s, by * s, s * 0.055, '#D32F2F');
+  ctx.restore();
+}
+
+/* ---------- 聖誕 ---------- */
+function drawSnowflake(ctx, x, y, r, rot) {
+  ctx.save();
+  ctx.translate(x, y); ctx.rotate(rot);
+  ctx.strokeStyle = 'rgba(255,255,255,0.95)'; ctx.lineWidth = Math.max(1.5, r * 0.13); ctx.lineCap = 'round';
+  for (let i = 0; i < 6; i++) {
+    ctx.rotate(TAU / 6);
+    ctx.beginPath();
+    ctx.moveTo(0, 0); ctx.lineTo(0, -r);
+    ctx.moveTo(0, -r * 0.55); ctx.lineTo(-r * 0.25, -r * 0.8);
+    ctx.moveTo(0, -r * 0.55); ctx.lineTo(r * 0.25, -r * 0.8);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+function drawHollyLeaf(ctx, len, ang, col) {
+  ctx.save();
+  ctx.rotate(ang);
+  const w = len * 0.28;
+  ctx.fillStyle = col;
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  const pts = [[0.15, -0.9], [0.3, -0.55], [0.5, -1.05], [0.65, -0.6], [0.85, -0.9], [1, 0], [0.85, 0.9], [0.65, 0.6], [0.5, 1.05], [0.3, 0.55], [0.15, 0.9]];
+  for (const [a, b] of pts) ctx.lineTo(len * a, w * b);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = Math.max(1, len * 0.025);
+  ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(len * 0.9, 0); ctx.stroke();
+  ctx.restore();
+}
+function drawHolly(ctx, x, y, s, ang) {
+  ctx.save();
+  ctx.translate(x, y); ctx.rotate(ang);
+  drawHollyLeaf(ctx, s, -0.5, '#1B7F3B');
+  drawHollyLeaf(ctx, s, 0.6, '#146B30');
+  drawHollyLeaf(ctx, s, 2.5, '#1E8C43');
+  for (const [bx, by] of [[-0.08, -0.06], [0.1, -0.08], [0.02, 0.1]]) drawBerry(ctx, bx * s, by * s, s * 0.12, '#C62828');
+  ctx.restore();
+}
+function drawLights(ctx, x1, x2, y, u, t) {
+  const cols = ['#FF3B30', '#FFCC00', '#34C759', '#0A84FF', '#FF9500', '#FF2D95'];
+  const n = Math.max(1, Math.round((x2 - x1) / (12 * u))), seg = (x2 - x1) / n, sag = 1.4 * u;
+  ctx.save();
+  ctx.strokeStyle = '#132313'; ctx.lineWidth = 0.25 * u;
+  ctx.beginPath(); ctx.moveTo(x1, y);
+  for (let i = 0; i < n; i++) ctx.quadraticCurveTo(x1 + seg * i + seg / 2, y + sag * 2, x1 + seg * (i + 1), y);
+  ctx.stroke();
+  let k = 0;
+  for (let i = 0; i < n; i++) {
+    for (let j = 1; j <= 3; j++) {
+      const tt = j / 4, px = x1 + seg * (i + tt), py = y + 4 * sag * tt * (1 - tt);
+      const c = cols[k % cols.length], on = 0.5 + 0.5 * Math.sin(t * 3 + k * 1.7);
+      ctx.save();
+      ctx.translate(px, py);
+      ctx.fillStyle = '#2E3B2E'; ctx.fillRect(-0.3 * u, 0, 0.6 * u, 0.6 * u);
+      ctx.globalAlpha = 0.55 + 0.45 * on;
+      ctx.shadowColor = c; ctx.shadowBlur = 1.8 * u * on;
+      ctx.fillStyle = c;
+      ctx.beginPath(); ctx.ellipse(0, 1.5 * u, 0.62 * u, 0.95 * u, 0, 0, TAU); ctx.fill();
+      ctx.restore();
+      k++;
+    }
+  }
+  ctx.restore();
+}
+
+/* =========================================================
+   頭飾（原點＝額頂 landmark 10，s＝臉寬，已按頭部傾側旋轉）
+   ========================================================= */
+function hwBunny(ctx, s, t) {
+  const wob = Math.sin(t * 2.2) * 0.05;
+  for (const dir of [-1, 1]) {
+    ctx.save();
+    ctx.translate(dir * 0.2 * s, -0.2 * s); ctx.rotate(dir * 0.26 + wob);
+    ctx.fillStyle = '#FFFFFF'; ctx.strokeStyle = '#C8C8C8'; ctx.lineWidth = 0.018 * s;
+    ctx.beginPath(); ctx.ellipse(0, -0.36 * s, 0.13 * s, 0.4 * s, 0, 0, TAU); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#FFB3C7';
+    ctx.beginPath(); ctx.ellipse(0, -0.34 * s, 0.065 * s, 0.3 * s, 0, 0, TAU); ctx.fill();
+    ctx.restore();
+  }
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = '#FF8FB1'; ctx.lineWidth = 0.075 * s;
+  headbandPath(ctx, s); ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,255,255,0.55)'; ctx.lineWidth = 0.02 * s;
+  ctx.beginPath(); ctx.ellipse(0, 0.16 * s, 0.53 * s, 0.42 * s, 0, Math.PI * 1.16, Math.PI * 1.84); ctx.stroke();
+}
+
+function drawIngot(ctx, cx, cy, w) {
+  ctx.save();
+  ctx.translate(cx, cy);
+  const g = ctx.createLinearGradient(0, -0.3 * w, 0, 0.3 * w);
+  g.addColorStop(0, '#FFF1A8'); g.addColorStop(0.5, '#F5C518'); g.addColorStop(1, '#B07D00');
+  ctx.fillStyle = g; ctx.strokeStyle = '#8A5A00'; ctx.lineWidth = w * 0.03;
+  ctx.beginPath();
+  ctx.moveTo(-0.5 * w, -0.12 * w);
+  ctx.bezierCurveTo(-0.46 * w, 0.3 * w, 0.46 * w, 0.3 * w, 0.5 * w, -0.12 * w);
+  ctx.quadraticCurveTo(0.28 * w, 0.02 * w, 0, 0.04 * w);
+  ctx.quadraticCurveTo(-0.28 * w, 0.02 * w, -0.5 * w, -0.12 * w);
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.ellipse(0, 0, 0.22 * w, 0.2 * w, 0, Math.PI, TAU); ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,0.75)';
+  ctx.beginPath(); ctx.ellipse(-0.07 * w, -0.1 * w, 0.05 * w, 0.03 * w, -0.5, 0, TAU); ctx.fill();
+  ctx.restore();
+}
+function hwCaishen(ctx, s) {
+  const gold = (y0, y1) => {
+    const g = ctx.createLinearGradient(0, y0, 0, y1);
+    g.addColorStop(0, '#FFE58A'); g.addColorStop(0.5, '#F2B81C'); g.addColorStop(1, '#B8860B');
+    return g;
+  };
+  for (const dir of [-1, 1]) {          // 兩邊帽翅
+    ctx.save();
+    ctx.translate(dir * 0.42 * s, -0.3 * s); ctx.rotate(-dir * 0.32);
+    ctx.fillStyle = gold(-0.09 * s, 0.09 * s); ctx.strokeStyle = '#8A5A00'; ctx.lineWidth = 0.015 * s;
+    ctx.beginPath(); ctx.ellipse(dir * 0.27 * s, 0, 0.29 * s, 0.085 * s, 0, 0, TAU); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#C8102E';
+    ctx.beginPath(); ctx.ellipse(dir * 0.27 * s, 0, 0.21 * s, 0.042 * s, 0, 0, TAU); ctx.fill();
+    drawCoin(ctx, dir * 0.55 * s, 0, 0.06 * s);
+    ctx.restore();
+  }
+  const cg = ctx.createLinearGradient(-0.45 * s, 0, 0.45 * s, 0);
+  cg.addColorStop(0, '#8E0A1E'); cg.addColorStop(0.5, '#D81E3A'); cg.addColorStop(1, '#8E0A1E');
+  ctx.fillStyle = cg; ctx.strokeStyle = '#F2C14E'; ctx.lineWidth = 0.025 * s;
+  ctx.beginPath();
+  ctx.moveTo(-0.44 * s, -0.06 * s);
+  ctx.bezierCurveTo(-0.47 * s, -0.5 * s, -0.28 * s, -0.7 * s, 0, -0.7 * s);
+  ctx.bezierCurveTo(0.28 * s, -0.7 * s, 0.47 * s, -0.5 * s, 0.44 * s, -0.06 * s);
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.strokeStyle = 'rgba(242,193,78,0.8)'; ctx.lineWidth = 0.012 * s;
+  ctx.beginPath();
+  ctx.moveTo(-0.3 * s, -0.14 * s);
+  ctx.quadraticCurveTo(-0.32 * s, -0.5 * s, 0, -0.6 * s);
+  ctx.quadraticCurveTo(0.32 * s, -0.5 * s, 0.3 * s, -0.14 * s);
+  ctx.stroke();
+  ctx.fillStyle = '#7A0616'; ctx.strokeStyle = '#F2C14E'; ctx.lineWidth = 0.025 * s;
+  roundRectPath(ctx, -0.5 * s, -0.2 * s, 1.0 * s, 0.24 * s, 0.06 * s); ctx.fill(); ctx.stroke();
+  for (let i = -3; i <= 3; i++) {
+    ctx.fillStyle = i % 2 ? '#F2C14E' : '#2E8B57';
+    ctx.beginPath(); ctx.arc(i * 0.13 * s, -0.08 * s, 0.03 * s, 0, TAU); ctx.fill();
+  }
+  drawIngot(ctx, 0, -0.37 * s, 0.36 * s);
+  ctx.fillStyle = gold(-0.8 * s, -0.68 * s);
+  ctx.beginPath(); ctx.arc(0, -0.74 * s, 0.055 * s, 0, TAU); ctx.fill();
+}
+
+function hwPartyHat(ctx, s, t) {
+  const baseY = -0.2 * s, apexY = -1.02 * s, half = 0.27 * s;
+  ctx.rotate(0.08);
+  const cone = new Path2D();
+  cone.moveTo(-half, baseY); cone.lineTo(0, apexY); cone.lineTo(half, baseY);
+  cone.quadraticCurveTo(0, baseY + 0.08 * s, -half, baseY); cone.closePath();
+  ctx.fillStyle = '#2F80ED'; ctx.fill(cone);
+  ctx.save();
+  ctx.clip(cone);
+  ctx.fillStyle = '#FFD60A';
+  for (let i = -2; i < 9; i++) {
+    ctx.save(); ctx.translate(0, apexY + i * 0.15 * s); ctx.rotate(-0.45);
+    ctx.fillRect(-s, 0, 2 * s, 0.055 * s);
+    ctx.restore();
+  }
+  for (const [dx, dy, c] of [[-0.1, -0.45, '#FF4D8D'], [0.08, -0.62, '#FF4D8D'], [0.12, -0.33, '#FFFFFF'], [-0.03, -0.8, '#FFFFFF'], [-0.16, -0.28, '#7CFC9A']]) {
+    ctx.fillStyle = c; ctx.beginPath(); ctx.arc(dx * s, dy * s, 0.035 * s, 0, TAU); ctx.fill();
+  }
+  const sh = ctx.createLinearGradient(-half, 0, half, 0);
+  sh.addColorStop(0, 'rgba(0,0,0,0.25)'); sh.addColorStop(0.45, 'rgba(255,255,255,0.15)'); sh.addColorStop(1, 'rgba(0,0,0,0.3)');
+  ctx.fillStyle = sh; ctx.fillRect(-half, apexY, 2 * half, baseY - apexY + 0.1 * s);
+  ctx.restore();
+  ctx.strokeStyle = '#1B4F9C'; ctx.lineWidth = 0.018 * s; ctx.stroke(cone);
+  for (let i = 0; i <= 8; i++) {
+    const x = -half + 2 * half * i / 8, y = baseY + 0.04 * s * Math.sin(Math.PI * i / 8);
+    ctx.fillStyle = i % 2 ? '#FFFFFF' : '#FF4D8D';
+    ctx.beginPath(); ctx.arc(x, y, 0.055 * s, 0, TAU); ctx.fill();
+  }
+  const bob = Math.sin(t * 3) * 0.012 * s;
+  for (let i = 0; i < 7; i++) {
+    const a = i * TAU / 7;
+    ctx.fillStyle = i % 2 ? '#FF4D8D' : '#FFD60A';
+    ctx.beginPath(); ctx.arc(Math.cos(a) * 0.05 * s, apexY + bob + Math.sin(a) * 0.05 * s, 0.05 * s, 0, TAU); ctx.fill();
+  }
+  ctx.fillStyle = '#FFFFFF';
+  ctx.beginPath(); ctx.arc(0, apexY + bob, 0.045 * s, 0, TAU); ctx.fill();
+}
+
+function hwTopHat(ctx, s) {
+  const brimY = -0.06 * s, topY = -0.72 * s, bw = 0.31 * s, tw = 0.34 * s;
+  const bg = ctx.createLinearGradient(0, brimY - 0.1 * s, 0, brimY + 0.1 * s);
+  bg.addColorStop(0, '#3A3A3A'); bg.addColorStop(1, '#0E0E0E');
+  ctx.fillStyle = bg;
+  ctx.beginPath(); ctx.ellipse(0, brimY, 0.62 * s, 0.11 * s, 0, 0, TAU); ctx.fill();
+  const crown = new Path2D();
+  crown.moveTo(-bw, brimY); crown.lineTo(-tw, topY); crown.lineTo(tw, topY); crown.lineTo(bw, brimY);
+  crown.quadraticCurveTo(0, brimY + 0.07 * s, -bw, brimY); crown.closePath();
+  const cg = ctx.createLinearGradient(-tw, 0, tw, 0);
+  cg.addColorStop(0, '#0E0E0E'); cg.addColorStop(0.35, '#3B3B3B'); cg.addColorStop(0.6, '#1C1C1C'); cg.addColorStop(1, '#0A0A0A');
+  ctx.fillStyle = cg; ctx.fill(crown);
+  ctx.save();
+  ctx.clip(crown);
+  ctx.fillStyle = '#7A1F2B'; ctx.fillRect(-tw, brimY - 0.17 * s, 2 * tw, 0.13 * s);
+  ctx.restore();
+  ctx.fillStyle = '#2A2A2A';
+  ctx.beginPath(); ctx.ellipse(0, topY, tw, 0.055 * s, 0, 0, TAU); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.2)'; ctx.lineWidth = 0.012 * s;
+  ctx.beginPath(); ctx.ellipse(0, brimY, 0.6 * s, 0.1 * s, 0, 0.1 * Math.PI, 0.9 * Math.PI); ctx.stroke();
+}
+
+function drawPeony(ctx, x, y, r) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.strokeStyle = 'rgba(80,0,20,0.3)'; ctx.lineWidth = Math.max(1, r * 0.03);
+  for (const [n, k, c] of [[8, 1.0, '#9E1B32'], [7, 0.75, '#C2334D'], [6, 0.5, '#E05A6E']]) {
+    ctx.fillStyle = c;
+    for (let i = 0; i < n; i++) {
+      const a = i * TAU / n + k;
+      ctx.beginPath(); ctx.ellipse(Math.cos(a) * r * k * 0.45, Math.sin(a) * r * k * 0.45, r * k * 0.5, r * k * 0.36, a, 0, TAU);
+      ctx.fill(); ctx.stroke();
+    }
+  }
+  ctx.fillStyle = '#F7C873';
+  ctx.beginPath(); ctx.arc(0, 0, r * 0.14, 0, TAU); ctx.fill();
+  ctx.restore();
+}
+function hwVintageFlower(ctx, s) {
+  ctx.lineCap = 'round'; ctx.strokeStyle = '#2B2B2B'; ctx.lineWidth = 0.06 * s;
+  headbandPath(ctx, s); ctx.stroke();
+  for (let i = 0; i < 9; i++) {
+    const a = Math.PI * (1.28 + 0.56 * i / 8);
+    drawPearl(ctx, Math.cos(a) * 0.53 * s, 0.16 * s + Math.sin(a) * 0.42 * s, 0.03 * s);
+  }
+  drawLeaf(ctx, -0.32 * s, -0.22 * s, 0.27 * s, Math.PI * 1.1, '#3E6B3A');
+  drawLeaf(ctx, -0.32 * s, -0.22 * s, 0.23 * s, Math.PI * 1.62, '#355E32');
+  drawPeony(ctx, -0.32 * s, -0.22 * s, 0.18 * s);
+  drawPeony(ctx, -0.1 * s, -0.31 * s, 0.09 * s);
+}
+
+function hwChrysanthemum(ctx, s) {
+  ctx.lineCap = 'round'; ctx.strokeStyle = '#2E6B34'; ctx.lineWidth = 0.055 * s;
+  headbandPath(ctx, s); ctx.stroke();
+  drawZhuyu(ctx, -0.2 * s, -0.3 * s, 0.42 * s, -2.3);
+  drawLeaf(ctx, -0.34 * s, -0.2 * s, 0.3 * s, Math.PI * 0.95, '#3E7B39');
+  drawChrysanthemum(ctx, -0.34 * s, -0.2 * s, 0.2 * s, CHRY.yellow);
+  drawChrysanthemum(ctx, -0.1 * s, -0.32 * s, 0.11 * s, CHRY.orange);
+}
+
+function drawFluffyBand(ctx, x, y, w, h) {
+  ctx.fillStyle = '#FFFFFF';
+  roundRectPath(ctx, x, y, w, h, h * 0.45); ctx.fill();
+  const n = 12;
+  for (let i = 0; i <= n; i++) {
+    const px = x + w * i / n;
+    ctx.beginPath(); ctx.arc(px, y + h * 0.15, h * 0.24, 0, TAU); ctx.fill();
+    ctx.beginPath(); ctx.arc(px, y + h * 0.85, h * 0.24, 0, TAU); ctx.fill();
+  }
+  const g = ctx.createLinearGradient(0, y, 0, y + h);
+  g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,0,0.12)');
+  ctx.fillStyle = g; roundRectPath(ctx, x, y, w, h, h * 0.45); ctx.fill();
+}
+function drawFluffBall(ctx, x, y, r) {
+  ctx.fillStyle = '#FFFFFF';
+  for (let i = 0; i < 8; i++) {
+    const a = i * TAU / 8;
+    ctx.beginPath(); ctx.arc(x + Math.cos(a) * r * 0.55, y + Math.sin(a) * r * 0.55, r * 0.55, 0, TAU); ctx.fill();
+  }
+  ctx.fillStyle = 'rgba(0,0,0,0.08)';
+  ctx.beginPath(); ctx.arc(x + r * 0.2, y + r * 0.25, r * 0.6, 0, TAU); ctx.fill();
+}
+function hwSanta(ctx, s) {
+  const body = new Path2D();
+  body.moveTo(-0.46 * s, -0.1 * s);
+  body.bezierCurveTo(-0.42 * s, -0.62 * s, 0.05 * s, -0.9 * s, 0.38 * s, -0.78 * s);
+  body.quadraticCurveTo(0.62 * s, -0.66 * s, 0.66 * s, -0.36 * s);
+  body.quadraticCurveTo(0.52 * s, -0.56 * s, 0.3 * s, -0.54 * s);
+  body.bezierCurveTo(0.42 * s, -0.38 * s, 0.46 * s, -0.24 * s, 0.46 * s, -0.1 * s);
+  body.closePath();
+  const g = ctx.createLinearGradient(-0.4 * s, -0.8 * s, 0.5 * s, 0);
+  g.addColorStop(0, '#E53935'); g.addColorStop(1, '#A31515');
+  ctx.fillStyle = g; ctx.fill(body);
+  ctx.strokeStyle = 'rgba(90,0,0,0.5)'; ctx.lineWidth = 0.015 * s; ctx.stroke(body);
+  drawFluffyBand(ctx, -0.52 * s, -0.22 * s, 1.04 * s, 0.22 * s);
+  drawFluffBall(ctx, 0.66 * s, -0.34 * s, 0.1 * s);
+}
+function hwAntlers(ctx, s) {
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  const branches = [
+    [[0, 0], [0.1, -0.35], [0.22, -0.58]],
+    [[0.05, -0.2], [-0.04, -0.3], [-0.09, -0.4]],
+    [[0.13, -0.4], [0.06, -0.5], [0.03, -0.6]],
+    [[0.17, -0.47], [0.26, -0.47], [0.33, -0.52]],
+  ];
+  for (const dir of [-1, 1]) {
+    ctx.save();
+    ctx.translate(dir * 0.22 * s, -0.24 * s); ctx.scale(dir, 1);
+    for (const [w, col] of [[0.075, '#5D3A1A'], [0.05, '#A0692F']]) {
+      ctx.strokeStyle = col; ctx.lineWidth = w * s;
+      for (const [a, b, c] of branches) {
+        ctx.beginPath(); ctx.moveTo(a[0] * s, a[1] * s); ctx.quadraticCurveTo(b[0] * s, b[1] * s, c[0] * s, c[1] * s); ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+  ctx.strokeStyle = '#6D4C2F'; ctx.lineWidth = 0.06 * s;
+  headbandPath(ctx, s); ctx.stroke();
+}
+
+/* =========================================================
+   相框（每個主題）
+   ========================================================= */
+function frameMidAutumn(ctx, W, H, t) {
+  const L = frameLayout(W, H, 2.6, 9, 11), u = L.u;
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#0A1640'); g.addColorStop(1, '#1D2F6E');
+  fillBands(ctx, L, g);
+  ctx.save();
+  ctx.fillStyle = '#FFF4C2';
+  for (const [a, b, c, d] of RND.stars) {
+    const x = a * W, y = b * H;
+    if (inInner(L, x, y, 1.2 * u) || inTextZone(L, x, y)) continue;
+    ctx.globalAlpha = 0.45 + 0.55 * Math.abs(Math.sin(t * 1.6 + d * 9));
+    drawStar4(ctx, x, y, (0.3 + c * 0.5) * u);
+  }
+  ctx.restore();
+  innerLine(ctx, L, '#E9C46A', 0.45 * u, 0.35 * u);
+  const mx = L.rx - 11 * u, my = L.iy + 2.5 * u;
+  drawMoon(ctx, mx, my, 8.5 * u);
+  drawCloud(ctx, mx - 7 * u, my + 7.5 * u, 6 * u);
+  drawCloud(ctx, mx + 6.5 * u, my + 9.5 * u, 4.2 * u);
+  [[5, 5, 3.6], [13.5, 11, 4.2], [22, 3.5, 3.2]].forEach(([dx, len, r], i) => {
+    drawLantern(ctx, L.ix + dx * u, L.iy, len * u, r * u, Math.sin(t * 1.3 + i * 1.7) * 0.07);
+  });
+  drawRabbit(ctx, L.ix + 8 * u, L.by - 0.2 * u, 6.5 * u);
+  drawHeaderText(ctx, L, '中秋快樂', '#F6D776', '#06102E');
+  drawCaption(ctx, L, '#F6D776', '#06102E');
+}
+
+function frameNewYear(ctx, W, H) {
+  const L = frameLayout(W, H, 2.6, 9, 11), u = L.u;
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#A50E1C'); g.addColorStop(1, '#C8102E');
+  fillBands(ctx, L, g);
+  innerLine(ctx, L, '#F2C14E', 0.5 * u, 0.3 * u);
+  innerLine(ctx, L, '#F2C14E', 0.18 * u, 1.3 * u);
+  drawCoin(ctx, L.ix + 4.5 * u, L.top / 2, 3 * u);
+  drawCoin(ctx, L.rx - 4.5 * u, L.top / 2, 3 * u);
+  const cw = 8.5 * u;
+  drawCouplet(ctx, L.ix + 1.8 * u, L.iy + 3 * u, cw, '身體健康');
+  drawCouplet(ctx, L.rx - 1.8 * u - cw, L.iy + 3 * u, cw, '龍馬精神');
+  drawPlumBranch(ctx, L.ix + 1.5 * u, L.by, 17 * u, false);
+  drawPlumBranch(ctx, L.rx - 1.5 * u, L.by, 17 * u, true);
+  drawHeaderText(ctx, L, '新年快樂', '#FFD966', '#6E0510');
+  drawCaption(ctx, L, '#FFD966', '#6E0510');
+}
+
+function frameBirthday(ctx, W, H, t) {
+  const L = frameLayout(W, H, 3, 9, 11), u = L.u;
+  fillBands(ctx, L, '#FFFFFF');
+  ctx.save();
+  for (const [a, b, c, d, e] of RND.confetti) {
+    const x = a * W, y = b * H;
+    if (inInner(L, x, y, 0.8 * u) || inTextZone(L, x, y)) continue;
+    ctx.save();
+    ctx.translate(x, y); ctx.rotate(c * TAU);
+    ctx.fillStyle = PARTY_COLORS[Math.floor(e * PARTY_COLORS.length)];
+    ctx.fillRect(-0.35 * u, -0.2 * u, (0.5 + d * 0.6) * u, 0.4 * u);
+    ctx.restore();
+  }
+  ctx.lineCap = 'round'; ctx.lineWidth = 0.35 * u;
+  const waves = [[PARTY_COLORS[0], 0], [PARTY_COLORS[2], Math.PI]];
+  for (const [col, ph] of waves) {
+    ctx.strokeStyle = col;
+    drawWave(ctx, L.side / 2, 0, L.side / 2, H, 0.55 * u, 4 * u, ph + t);
+    drawWave(ctx, W - L.side / 2, 0, W - L.side / 2, H, 0.55 * u, 4 * u, ph - t);
+    drawWave(ctx, 0, H - 1.2 * u, W, H - 1.2 * u, 0.45 * u, 4 * u, ph + t);
+  }
+  ctx.restore();
+  const rg = ctx.createLinearGradient(0, 0, W, 0);
+  PARTY_COLORS.forEach((c, i) => rg.addColorStop(i / (PARTY_COLORS.length - 1), c));
+  innerLine(ctx, L, rg, 0.6 * u, 0.2 * u);
+  drawBunting(ctx, L.ix, L.ix + L.iw * 0.3, L.iy + 0.3 * u, 3 * u, 4.2 * u, 5 * u);
+  drawBunting(ctx, L.rx - L.iw * 0.3, L.rx, L.iy + 0.3 * u, 3 * u, 4.2 * u, 5 * u);
+  drawCurlyStreamer(ctx, L.ix + L.iw * 0.33, L.iy, 13 * u, u, PARTY_COLORS[0], t);
+  drawCurlyStreamer(ctx, L.rx - L.iw * 0.33, L.iy, 11 * u, u, PARTY_COLORS[4], t + 1);
+  [[4.5, 17, 3.2, '#FF4D6D', '#B3123A'], [10.5, 21, 3.4, '#FFB703', '#C77C00'], [7, 27, 3, '#3A86FF', '#1D4FB8']].forEach(([dx, h, r, c1, c2], i) => {
+    const bob = Math.sin(t * 1.6 + i) * 0.6 * u, by = L.by - h * u + bob;
+    drawBalloon(ctx, L.ix + dx * u, by, r * u, c1, c2, L.by - (by + r * 1.3 * u));
+  });
+  drawPlate(ctx, L.rx - 10 * u, L.by - 1.4 * u, 12 * u);
+  drawPeach(ctx, L.rx - 10 * u, L.by - 8.2 * u, 2.9 * u);
+  drawPeach(ctx, L.rx - 12.8 * u, L.by - 4.4 * u, 3.1 * u);
+  drawPeach(ctx, L.rx - 7.2 * u, L.by - 4.2 * u, 3 * u);
+  drawRainbowText(ctx, '生日快樂', W / 2, L.top / 2 + 0.3 * u, 6.4 * u);
+  drawCaption(ctx, L, '#222222', null);
+}
+
+function frameVintage(ctx, W, H) {
+  const bw = settings.vintageFilter === 'bw';
+  const L = frameLayout(W, H, 5, 5, 13), u = L.u, m = 1.3 * u;
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0, 0, W, H); ctx.rect(L.ix, L.iy, L.iw, L.ih);
+  ctx.fillStyle = bw ? '#262626' : '#3A2A1C'; ctx.fill('evenodd');
+  ctx.beginPath(); decklePath(ctx, m, m, W - 2 * m, H - 2 * m, 0.9 * u); ctx.rect(L.ix, L.iy, L.iw, L.ih);
+  const pg = ctx.createLinearGradient(0, 0, W, H);
+  pg.addColorStop(0, bw ? '#F2F1ED' : '#F3E7CC'); pg.addColorStop(1, bw ? '#D8D6D0' : '#E0CBA0');
+  ctx.fillStyle = pg; ctx.shadowColor = 'rgba(0,0,0,0.55)'; ctx.shadowBlur = u;
+  ctx.fill('evenodd');
+  ctx.restore();
+  ctx.save();
+  ctx.beginPath(); decklePath(ctx, m, m, W - 2 * m, H - 2 * m, 0.9 * u); ctx.rect(L.ix, L.iy, L.iw, L.ih);
+  ctx.clip('evenodd');
+  for (const [a, b, c] of RND.stains) {
+    const x = a * W, y = b * H, r = (3 + c * 6) * u;
+    const sg = ctx.createRadialGradient(x, y, 0, x, y, r);
+    sg.addColorStop(0, bw ? 'rgba(90,90,90,0.14)' : 'rgba(150,105,45,0.18)'); sg.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = sg; ctx.fillRect(x - r, y - r, 2 * r, 2 * r);
+  }
+  ctx.beginPath(); decklePath(ctx, m, m, W - 2 * m, H - 2 * m, 0.9 * u);
+  ctx.strokeStyle = bw ? 'rgba(80,80,80,0.35)' : 'rgba(120,85,40,0.4)'; ctx.lineWidth = 1.4 * u; ctx.stroke();
+  ctx.restore();
+  ctx.save();
+  ctx.strokeStyle = 'rgba(60,42,25,0.6)'; ctx.lineWidth = 0.25 * u;
+  ctx.strokeRect(L.ix, L.iy, L.iw, L.ih);
+  const cs = 7 * u, o = m - 0.2 * u;
+  const corners = [[o, o, 1, 1], [W - o, o, -1, 1], [o, H - o, 1, -1], [W - o, H - o, -1, -1]];
+  for (const [x, y, sx, sy] of corners) {       // 相簿相角
+    ctx.fillStyle = '#1C1916';
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + sx * cs, y); ctx.lineTo(x, y + sy * cs); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.25)'; ctx.lineWidth = 0.15 * u;
+    ctx.beginPath(); ctx.moveTo(x + sx * cs, y); ctx.lineTo(x, y + sy * cs); ctx.stroke();
+  }
+  ctx.restore();
+  drawCaption(ctx, L, bw ? '#2B2B2B' : '#5A3B1E', null, FONT_KAI);
+}
+
+function frameChungYeung(ctx, W, H, t) {
+  const L = frameLayout(W, H, 2.6, 9, 11), u = L.u;
+  // 落葉（只喺兩邊，唔遮塊面）
+  for (const [a, b, c, d] of RND.leaves) {
+    const right = a >= 0.5, xr = (a % 0.5) * 2;
+    const x0 = right ? L.rx - xr * L.iw * 0.15 : L.ix + xr * L.iw * 0.15;
+    const y = L.iy + ((b + t * (0.025 + c * 0.03)) % 1) * L.ih;
+    drawLeaf(ctx, x0 + Math.sin(t * 1.5 + d * 6) * 1.5 * u, y, (2.6 + c * 1.6) * u, t * (0.6 + d) + d * 6,
+      ['#E4572E', '#F3A712', '#C0392B', '#D35400'][Math.floor(d * 4)]);
+  }
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#5E2716'); g.addColorStop(1, '#8C3F22');
+  fillBands(ctx, L, g);
+  innerLine(ctx, L, '#F2C14E', 0.45 * u, 0.35 * u);
+  drawChrysanthemum(ctx, L.ix + 4.5 * u, L.top / 2, 2.8 * u, CHRY.yellow);
+  drawChrysanthemum(ctx, L.rx - 4.5 * u, L.top / 2, 2.8 * u, CHRY.yellow);
+  // 左下
+  drawLeaf(ctx, L.ix + 3 * u, L.by - 2 * u, 6.5 * u, -1.2, '#3E7B39');
+  drawLeaf(ctx, L.ix + 7 * u, L.by - 1.5 * u, 6.5 * u, -0.35, '#2F6B2C');
+  drawZhuyu(ctx, L.ix + 1.5 * u, L.by - 9 * u, 10 * u, -0.75);
+  drawChrysanthemum(ctx, L.ix + 2.8 * u, L.by - 12 * u, 3 * u, CHRY.white);
+  drawChrysanthemum(ctx, L.ix + 12.5 * u, L.by - 3.2 * u, 3.4 * u, CHRY.orange);
+  drawChrysanthemum(ctx, L.ix + 5.5 * u, L.by - 5 * u, 4.6 * u, CHRY.yellow);
+  // 右下
+  drawLeaf(ctx, L.rx - 3 * u, L.by - 2 * u, 6.5 * u, Math.PI + 1.2, '#3E7B39');
+  drawLeaf(ctx, L.rx - 7 * u, L.by - 1.5 * u, 6.5 * u, Math.PI + 0.35, '#2F6B2C');
+  drawZhuyu(ctx, L.rx - 1.5 * u, L.by - 9 * u, 10 * u, Math.PI + 0.75);
+  drawChrysanthemum(ctx, L.rx - 2.8 * u, L.by - 12 * u, 3 * u, CHRY.purple);
+  drawChrysanthemum(ctx, L.rx - 12.5 * u, L.by - 3.2 * u, 3.4 * u, CHRY.yellow);
+  drawChrysanthemum(ctx, L.rx - 5.5 * u, L.by - 5 * u, 4.6 * u, CHRY.orange);
+  drawHeaderText(ctx, L, '重陽節快樂', '#FFD966', '#3D140A');
+  drawCaption(ctx, L, '#FFD966', '#3D140A');
+}
+
+function frameChristmas(ctx, W, H, t) {
+  const L = frameLayout(W, H, 2.6, 9, 11), u = L.u;
+  ctx.save();
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  for (const [a, b, c, d] of RND.snow) {
+    const side = a < 0.5 ? a * 2 : (a - 0.5) * 2;          // 只喺左右兩邊落雪，唔遮塊面
+    const x = a < 0.5 ? L.ix + side * L.iw * 0.24 : L.rx - side * L.iw * 0.24;
+    const y = L.iy + ((b + t * (0.025 + c * 0.035)) % 1) * L.ih;
+    ctx.beginPath(); ctx.arc(x + Math.sin(t * 0.7 + d * TAU) * 0.8 * u, y, (0.25 + c * 0.45) * u, 0, TAU); ctx.fill();
+  }
+  ctx.restore();
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#0B4D2C'); g.addColorStop(1, '#0F6B3B');
+  fillBands(ctx, L, g);
+  for (const [a, b, c, d] of RND.flakes) {
+    const x = a * W, y = b * H;
+    if (inInner(L, x, y, 1.5 * u) || inTextZone(L, x, y)) continue;
+    drawSnowflake(ctx, x, y, (0.5 + c * 0.7) * u, d * TAU + t * 0.3);
+  }
+  innerLine(ctx, L, '#FFFFFF', 0.6 * u, 0.3 * u);
+  ctx.save(); ctx.setLineDash([1.2 * u, 1.2 * u]); innerLine(ctx, L, '#D62828', 0.6 * u, 0.3 * u); ctx.restore();
+  ctx.save();
+  ctx.fillStyle = '#FFFFFF'; ctx.shadowColor = 'rgba(0,0,0,0.25)'; ctx.shadowBlur = 0.6 * u;
+  ctx.beginPath();
+  for (let x = L.ix; x <= L.rx + 2 * u; x += 2.6 * u) {
+    const r = (1.4 + 0.6 * Math.sin(x * 0.37 / u)) * u;
+    ctx.moveTo(x + r, L.by); ctx.arc(x, L.by, r, 0, TAU);
+  }
+  ctx.fill();
+  ctx.restore();
+  drawLights(ctx, L.ix, L.rx, L.iy + 0.2 * u, u, t);
+  drawHolly(ctx, L.ix + 3.5 * u, L.iy + 6 * u, 4 * u, 0.3);
+  drawHolly(ctx, L.rx - 3.5 * u, L.iy + 6 * u, 4 * u, Math.PI - 0.3);
+  drawHolly(ctx, L.ix + 4 * u, L.by - 3.5 * u, 4.5 * u, -0.4);
+  drawHolly(ctx, L.rx - 4 * u, L.by - 3.5 * u, 4.5 * u, Math.PI + 0.4);
+  drawHeaderText(ctx, L, '聖誕快樂', '#FFFFFF', '#B71C1C');
+  drawCaption(ctx, L, '#FFFFFF', '#0B3D22');
+}
+
+function framePlain(ctx, W, H) {
+  const L = frameLayout(W, H, 2.4, 2.4, 10), u = L.u;
+  fillBands(ctx, L, '#FFFFFF');
+  innerLine(ctx, L, '#C9A227', 0.3 * u, 0.5 * u);
+  drawCaption(ctx, L, '#222222', null);
+}
+
+/* =========================================================
+   主題一覽
+   ========================================================= */
+const NO_HAT = { id: 'none', name: '唔戴' };
+const THEMES = [
+  { id: 'midautumn', name: '中秋', icon: '🌕', frame: frameMidAutumn,
+    headwear: [{ id: 'bunny', name: '兔仔耳', draw: hwBunny }, NO_HAT] },
+  { id: 'newyear', name: '新年', icon: '🧧', frame: frameNewYear,
+    headwear: [{ id: 'caishen', name: '財神帽', draw: hwCaishen }, NO_HAT] },
+  { id: 'birthday', name: '生日', icon: '🎂', frame: frameBirthday,
+    headwear: [{ id: 'party', name: '生日帽', draw: hwPartyHat }, NO_HAT] },
+  { id: 'vintage', name: '懷舊', icon: '📷', frame: frameVintage, afterVideo: vintageOverlay, hasFilter: true,
+    videoFilter: () => settings.vintageFilter === 'bw'
+      ? 'grayscale(1) contrast(1.15) brightness(1.03)'
+      : 'sepia(0.85) contrast(1.05) brightness(1.02) saturate(0.9)',
+    headwear: [{ id: 'tophat', name: '紳士帽', draw: hwTopHat }, { id: 'flower', name: '舊式髮飾', draw: hwVintageFlower }, NO_HAT] },
+  { id: 'chungyeung', name: '重陽', icon: '🌼', frame: frameChungYeung,
+    headwear: [{ id: 'chrys', name: '菊花髮飾', draw: hwChrysanthemum }, NO_HAT] },
+  { id: 'christmas', name: '聖誕', icon: '🎄', frame: frameChristmas,
+    headwear: [{ id: 'santa', name: '聖誕帽', draw: hwSanta }, { id: 'antler', name: '鹿角', draw: hwAntlers }, NO_HAT] },
+  { id: 'plain', name: '無裝飾', icon: '🖼️', frame: framePlain, headwear: [NO_HAT] },
+];
+const VINTAGE_FILTERS = [{ id: 'sepia', name: '泛黃' }, { id: 'bw', name: '黑白' }];
+
+function currentTheme() { return THEMES[app.themeIndex]; }
+function currentHeadwear(theme = currentTheme()) {
+  const id = settings.headwear[theme.id];
+  return theme.headwear.find((h) => h.id === id) || theme.headwear[0];
+}
+
+/* =========================================================
+   畫面合成：鏡頭（鏡像）→ 濾鏡 → 頭飾 → 相框 → 底部文字
+   ========================================================= */
+function render(ctx, W, H, now) {
+  const theme = currentTheme(), t = now / 1000;
+  const vf = theme.videoFilter ? theme.videoFilter() : 'none';
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1;
+  ctx.filter = vf;
+  ctx.translate(W, 0); ctx.scale(-1, 1);          // 左右鏡像
+  ctx.drawImage(els.video, 0, 0, W, H);
+  ctx.restore();
+  if (theme.afterVideo) { ctx.save(); theme.afterVideo(ctx, W, H, t); ctx.restore(); }
+  const hw = currentHeadwear(theme);
+  if (hw.draw) {
+    for (const tr of app.tracks) {
+      if (tr.alpha <= 0.01) continue;
+      const s = tr.w * W;
+      if (s < 10) continue;
+      ctx.save();
+      ctx.globalAlpha = tr.alpha;
+      ctx.filter = vf;
+      ctx.translate(tr.x * W, tr.y * H);
+      ctx.rotate(tr.angle);
+      hw.draw(ctx, s, t);
+      ctx.restore();
+    }
+  }
+  ctx.save(); theme.frame(ctx, W, H, t); ctx.restore();
+}
+
+/* =========================================================
+   臉部追蹤 + 平滑處理
+   ========================================================= */
+function measureFace(lm, bs, vw, vh) {
+  if (!lm || lm.length < 455) return null;
+  const P = (i) => ({ x: (1 - lm[i].x) * vw, y: lm[i].y * vh, z: lm[i].z * vw });   // x 反轉＝鏡像
+  const top = P(10), l = P(234), r = P(454), e1 = P(33), e2 = P(263);
+  const w = Math.hypot(r.x - l.x, r.y - l.y, r.z - l.z);        // 臉寬（加入 z，轉頭時大小較穩定）
+  const [a, b] = e1.x <= e2.x ? [e1, e2] : [e2, e1];
+  const angle = Math.atan2(b.y - a.y, b.x - a.x);               // 頭部傾側角度
+  let sl = 0, sr = 0;
+  if (bs && bs.categories) {
+    for (const c of bs.categories) {
+      if (c.categoryName === 'mouthSmileLeft') sl = c.score;
+      else if (c.categoryName === 'mouthSmileRight') sr = c.score;
+    }
+  }
+  return { x: top.x / vw, y: top.y / vh, w: w / vw, angle, smile: (sl + sr) / 2 };
+}
+function updateTracks(result, now, vw, vh) {
+  const faces = (result && result.faceLandmarks) || [];
+  const shapes = (result && result.faceBlendshapes) || [];
+  const meas = faces.map((lm, i) => measureFace(lm, shapes[i], vw, vh)).filter(Boolean);
+  const free = new Set(app.tracks);
+  for (const m of meas) {
+    let best = null, bestD = Infinity;
+    for (const tr of free) {
+      const d = Math.hypot((tr.x - m.x) * vw, (tr.y - m.y) * vh);
+      if (d < bestD) { bestD = d; best = tr; }
+    }
+    if (best && bestD < m.w * vw * 0.9) {
+      free.delete(best);
+      // 平滑：郁得少就跟得慢（防抖），郁得多就跟得快（唔會拖）
+      const move = bestD / Math.max(1, m.w * vw);
+      const k = clamp(0.25 + move * 1.5, 0.25, 0.85);
+      best.x += (m.x - best.x) * k;
+      best.y += (m.y - best.y) * k;
+      best.w += (m.w - best.w) * Math.min(0.5, k * 0.7);
+      best.angle += angleDiff(m.angle, best.angle) * Math.min(0.6, k);
+      best.smile += (m.smile - best.smile) * 0.5;
+      best.lastSeen = now;
+    } else {
+      app.tracks.push({ id: app.nextTrackId++, ...m, alpha: 0, lastSeen: now });
+    }
+  }
+}
+function updateTrackAlpha(now, dt) {
+  for (const tr of app.tracks) {
+    const seen = now - tr.lastSeen < 160;
+    tr.alpha = clamp(tr.alpha + (seen ? dt / 180 : -dt / 320), 0, 1);
+  }
+  app.tracks = app.tracks.filter((tr) => tr.alpha > 0 || now - tr.lastSeen < 160);
+}
+function visibleTracks(now) { return app.tracks.filter((tr) => now - tr.lastSeen < 400); }
+
+/* =========================================================
+   主迴圈
+   ========================================================= */
+const brightCanvas = document.createElement('canvas');
+brightCanvas.width = 48; brightCanvas.height = 27;
+const brightCtx = brightCanvas.getContext('2d', { willReadFrequently: true });
+
+function ensureStageSize(vw, vh) {
+  const scale = vh < 1080 ? 1080 / vh : 1;       // 至少 1080 高，接電視、印相都清楚
+  const W = Math.round(vw * scale), H = Math.round(vh * scale);
+  if (els.stage.width !== W || els.stage.height !== H) {
+    els.stage.width = W; els.stage.height = H;
+    fitStage();
+  }
+}
+function fitStage() {
+  const r = els.stageWrap.getBoundingClientRect();
+  if (!r.width || !r.height) return;
+  const pad = app.controlsHidden ? 0 : 10;
+  const s = Math.min((r.width - pad * 2) / els.stage.width, (r.height - pad * 2) / els.stage.height);
+  els.stage.style.width = Math.floor(els.stage.width * s) + 'px';
+  els.stage.style.height = Math.floor(els.stage.height * s) + 'px';
+}
+new ResizeObserver(fitStage).observe(els.stageWrap);
+
+function sampleBrightness(now) {
+  app.lastBrightAt = now;
+  try {
+    brightCtx.drawImage(els.video, 0, 0, 48, 27);
+    const d = brightCtx.getImageData(0, 0, 48, 27).data;
+    let sum = 0;
+    for (let i = 0; i < d.length; i += 4) sum += 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
+    const b = sum / (d.length / 4);
+    app.brightness = app.brightness * 0.6 + b * 0.4;
+  } catch (e) { /* 忽略 */ }
+}
+
+function loop(now) {
+  requestAnimationFrame(loop);
+  const v = els.video;
+  if (!app.stream || v.readyState < 2 || !v.videoWidth) return;
+  if (now - app.lastFrameAt < 30) return;          // 約 30fps 已經夠順，慳電
+  const dt = Math.min(100, now - app.lastFrameAt);
+  app.lastFrameAt = now;
+  ensureStageSize(v.videoWidth, v.videoHeight);
+  if (app.landmarker && app.phase !== 'preview' && v.currentTime !== app.lastVideoTime) {
+    app.lastVideoTime = v.currentTime;
+    try {
+      const res = app.landmarker.detectForVideo(v, now);
+      updateTracks(res, now, v.videoWidth, v.videoHeight);
+      app.detectErrors = 0;
+    } catch (e) {
+      console.error('臉部偵測出錯', e);
+      if (++app.detectErrors > 40) {
+        app.landmarker = null; app.mpStatus = 'failed'; app.mpError = e;
+        showMpError(e);
+      }
+    }
+  }
+  updateTrackAlpha(now, dt);
+  if (app.phase !== 'preview') render(stageCtx, els.stage.width, els.stage.height, now);
+  if (now - app.lastBrightAt > 500) sampleBrightness(now);
+  updateSmile(now);
+  updateHint(now);
+}
+
+/* =========================================================
+   溫和提示（偵測唔到臉／太遠／太暗）
+   ========================================================= */
+function wantedHint(now) {
+  if (app.phase !== 'live' || app.modal) return '';
+  const dark = app.brightness < 50;
+  if (app.mpStatus === 'loading') return '⏳ 臉部偵測準備中，請稍等……';
+  if (!app.landmarker) return dark ? '💡 光線有啲暗，請開多盞燈' : '';
+  const vis = visibleTracks(now);
+  if (!vis.length) {
+    if (!app.noFaceSince) app.noFaceSince = now;
+    if (now - app.noFaceSince < 1800) return '';
+    return dark ? '💡 光線唔夠，請開多盞燈' : '🙂 請行近少少，望住鏡頭';
+  }
+  app.noFaceSince = 0;
+  if (Math.max(...vis.map((tr) => tr.w)) < 0.13) return '🙂 請行近少少';   // 再細啲就會偵測唔到（約 1 米外）
+  if (dark) return '💡 開多盞燈，相會靚啲';
+  return '';
+}
+function updateHint(now) {
+  const want = wantedHint(now);
+  if (want !== app.hintCandidate) { app.hintCandidate = want; app.hintCandidateSince = now; }
+  const delay = want === '' || app.phase !== 'live' ? 250 : 700;   // 等一陣先轉，避免閃來閃去
+  if (want !== app.hintShown && now - app.hintCandidateSince > delay) {
+    app.hintShown = want;
+    if (want) els.hint.textContent = want;
+    els.hint.classList.toggle('show', !!want);
+  }
+}
+
+/* =========================================================
+   笑一笑自動影相
+   ========================================================= */
+function smileThreshold() { return (SMILE_LEVELS.find((l) => l.id === settings.smileLevel) || SMILE_LEVELS[1]).th; }
+function updateSmile(now) {
+  const active = app.autoSmile && app.phase === 'live' && !app.modal && !!app.landmarker;
+  els.smileMeter.classList.toggle('hidden', !active);
+  if (!active) { app.smileStart = 0; return; }
+  if (now < app.smileCooldownUntil) {
+    els.smileText.textContent = '😊 準備緊……';
+    els.smileBar.style.width = '0%';
+    app.smileStart = 0;
+    return;
+  }
+  const vis = visibleTracks(now);
+  const best = vis.length ? Math.max(...vis.map((tr) => tr.smile)) : 0;
+  if (best >= smileThreshold()) {
+    app.smileLastAbove = now;
+    if (!app.smileStart) app.smileStart = now;
+  } else if (app.smileStart && now - app.smileLastAbove > 250) {
+    app.smileStart = 0;                           // 容許短暫走咗笑容少少
+  }
+  const p = app.smileStart ? clamp((now - app.smileStart) / 1000, 0, 1) : 0;   // 維持約 1 秒
+  els.smileText.textContent = vis.length ? (p > 0 ? '😊 好呀！保持笑容……' : '😊 笑一笑就會自動影相') : '😊 等緊有人入鏡……';
+  els.smileBar.style.width = Math.round(p * 100) + '%';
+  if (p >= 1) { app.smileStart = 0; startCountdown(); }
+}
+
+/* =========================================================
+   聲音：廣東話倒數、快門聲
+   ========================================================= */
+let cantoVoice = null;
+function pickVoice() {
+  if (!('speechSynthesis' in window)) return;
+  const vs = speechSynthesis.getVoices();
+  const hk = vs.filter((v) => /^(zh[-_]HK|yue)/i.test(v.lang) || /粵|Cantonese|Hong Kong/i.test(v.name));
+  cantoVoice = hk.find((v) => v.localService) || hk[0] || null;   // 優先用本機聲音
+}
+if ('speechSynthesis' in window) {
+  pickVoice();
+  speechSynthesis.addEventListener('voiceschanged', pickVoice);
+}
+function speak(text) {
+  if (!settings.voice || !('speechSynthesis' in window)) return false;
+  try {
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'zh-HK';
+    if (cantoVoice) u.voice = cantoVoice;
+    u.rate = 0.95; u.volume = 1;
+    speechSynthesis.speak(u);
+    return true;
+  } catch (e) { return false; }
+}
+function stopSpeech() {
+  try {
+    if ('speechSynthesis' in window && (speechSynthesis.speaking || speechSynthesis.pending)) { speechSynthesis.cancel(); return true; }
+  } catch (e) { /* 忽略 */ }
+  return false;
+}
+
+let audioCtx = null;
+function unlockAudio() {
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+  } catch (e) { audioCtx = null; }
+}
+function beep(freq) {
+  if (!audioCtx) return;
+  const t0 = audioCtx.currentTime, o = audioCtx.createOscillator(), g = audioCtx.createGain();
+  o.frequency.value = freq; o.type = 'sine';
+  g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(0.35, t0 + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.3);
+  o.connect(g).connect(audioCtx.destination); o.start(t0); o.stop(t0 + 0.32);
+}
+function playShutter() {
+  if (!settings.shutter || !audioCtx) return;
+  const ac = audioCtx, len = Math.floor(ac.sampleRate * 0.2);
+  const buf = ac.createBuffer(1, len, ac.sampleRate), d = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) {
+    const x = i / len;
+    d[i] = (Math.random() * 2 - 1) * Math.pow(1 - x, 3) * (x > 0.3 && x < 0.42 ? 0.25 : 1);
+  }
+  const src = ac.createBufferSource(), f = ac.createBiquadFilter(), g = ac.createGain();
+  src.buffer = buf; f.type = 'highpass'; f.frequency.value = 1000; g.gain.value = 0.7;
+  src.connect(f).connect(g).connect(ac.destination);
+  src.start();
+}
+
+/* =========================================================
+   影相流程：倒數 → 閃光 → 預覽 → 工作員決定儲存／再影
+   ========================================================= */
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function showCount(text, isWord) {
+  els.countNum.textContent = text;
+  els.countNum.classList.toggle('word', !!isWord);
+  els.countNum.classList.remove('pop'); void els.countNum.offsetWidth; els.countNum.classList.add('pop');
+}
+async function startCountdown() {
+  if (app.phase !== 'live' || app.modal) return;
+  app.phase = 'countdown';
+  const token = ++app.countdownToken;
+  setIdle(false);
+  els.countdown.classList.remove('hidden');
+  if (stopSpeech()) await sleep(80);     // Chrome：cancel 之後即刻 speak 有時會冇聲
+  if (token !== app.countdownToken) return;
+  for (const [n, say, f] of [['3', '三', 660], ['2', '二', 660], ['1', '一', 660]]) {
+    showCount(n, false);
+    if (!speak(say)) beep(f);
+    await sleep(1000);
+    if (token !== app.countdownToken) return;
+  }
+  showCount('笑一笑！', true);
+  if (!speak('笑一笑！')) beep(990);
+  await sleep(900);
+  if (token !== app.countdownToken) return;
+  els.countdown.classList.add('hidden');
+  takePhoto();
+}
+function cancelCountdown() {
+  if (app.phase !== 'countdown') return;
+  app.countdownToken++;
+  stopSpeech();
+  els.countdown.classList.add('hidden');
+  app.phase = 'live';
+  app.smileCooldownUntil = performance.now() + 2500;
+}
+function takePhoto() {
+  const W = els.stage.width, H = els.stage.height;
+  photoCanvas.width = W; photoCanvas.height = H;
+  render(photoCtx, W, H, performance.now());
+  app.photoTime = new Date();
+  app.phase = 'preview';
+  app.photoSaved = false;
+  els.flash.classList.remove('go'); void els.flash.offsetWidth; els.flash.classList.add('go');
+  playShutter();
+  setTimeout(() => {
+    if (app.phase !== 'preview') return;
+    els.previewBox.replaceChildren(photoCanvas);
+    els.saveBtn.disabled = false;
+    els.saveBtn.textContent = '💾 儲存相片（S）';
+    els.preview.classList.remove('hidden');
+  }, 250);
+}
+function retake() {
+  if (app.phase !== 'preview') return;
+  els.preview.classList.add('hidden');
+  app.phase = 'live';
+  app.smileCooldownUntil = performance.now() + 2500;   // 避免即刻又自動影
+}
+function pad2(n) { return String(n).padStart(2, '0'); }
+function fileName() {
+  const d = app.photoTime || new Date();
+  const name = (settings.activityName.trim() || '節日相').replace(/[\\/:*?"<>|\s]+/g, '_').slice(0, 40);
+  return `${name}_${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}_${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}.png`;
+}
+function savePhoto() {
+  if (app.phase !== 'preview' || app.photoSaved) return;
+  photoCanvas.toBlob((blob) => {
+    if (!blob) { toast('儲存唔到，請再試一次', true); return; }
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = fileName();
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 15000);
+    app.photoSaved = true;
+    els.saveBtn.textContent = '✅ 已儲存';
+    els.saveBtn.disabled = true;
+    toast('相片已儲存到「下載項目」資料夾');
+  }, 'image/png');
+}
+
+/* =========================================================
+   鏡頭
+   ========================================================= */
+const CAM_ERRORS = {
+  insecure: {
+    title: '未能開啟鏡頭：網頁開啟方式唔啱',
+    msg: 'Chrome 只容許喺 http://localhost 或者 https 網址使用鏡頭。',
+    steps: ['喺 Mac 打開「終端機」', '輸入 cd 再加一個空格，然後將呢個資料夾拖入視窗，按 Enter', '輸入：python3 -m http.server 8000 --bind 127.0.0.1　然後按 Enter', '用 Chrome 開啟：http://localhost:8000'],
+  },
+  denied: {
+    title: '未能開啟鏡頭：未有權限',
+    msg: 'Chrome 或者 Mac 系統未允許呢個網頁使用鏡頭。',
+    steps: ['撳 Chrome 網址列右邊有紅色交叉嘅鏡頭圖示（或者網址左邊嘅網站設定圖示），將「相機」改為「允許」', '如果仍然唔得：打開 Mac「系統設定」→「私隱與安全性」→「相機」，開啟「Google Chrome」（可能要重新開 Chrome）', '改好之後，撳下面「再試一次」'],
+  },
+  notfound: {
+    title: '搵唔到鏡頭',
+    msg: '電腦好似冇可以用嘅鏡頭。',
+    steps: ['如果 MacBook 接咗外置螢幕而蓋咗機，請打開 MacBook 蓋', '如果用 USB 鏡頭，請檢查有冇插好', '撳下面「再試一次」'],
+  },
+  busy: {
+    title: '鏡頭俾其他程式用緊',
+    msg: '另一個程式（或者另一個 Chrome 分頁）正在使用鏡頭。',
+    steps: ['請先關閉 Zoom、Teams、FaceTime、Photo Booth 等用緊鏡頭嘅程式', '亦請關閉其他用緊鏡頭嘅 Chrome 分頁', '撳下面「再試一次」'],
+  },
+  lost: {
+    title: '鏡頭中斷咗',
+    msg: '鏡頭突然冇咗畫面。',
+    steps: ['檢查鏡頭有冇被拔出，或者被其他程式佔用', '撳下面「再試一次」'],
+  },
+  unknown: {
+    title: '未能開啟鏡頭',
+    msg: '開鏡頭時出現未知問題。',
+    steps: ['撳下面「再試一次」', '如果仍然唔得，請完全關閉 Chrome 再重新開啟', '亦可以重新開機再試'],
+  },
+};
+function classifyCamError(e) {
+  const n = e && e.name;
+  if (n === 'NotAllowedError' || n === 'PermissionDeniedError' || n === 'SecurityError') return 'denied';
+  if (n === 'NotFoundError' || n === 'DevicesNotFoundError' || n === 'OverconstrainedError') return 'notfound';
+  if (n === 'NotReadableError' || n === 'TrackStartError' || n === 'AbortError') return 'busy';
+  return 'unknown';
+}
+function isBuiltInCam(label) { return /facetime|built-?in|內置|內建|integrated/i.test(label || ''); }
+const CAM_BASE = { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } };
+const getStream = (video) => navigator.mediaDevices.getUserMedia({ video, audio: false });
+
+function stopCamera() {
+  if (app.stream) app.stream.getTracks().forEach((t) => t.stop());
+  app.stream = null;
+}
+async function startCamera() {
+  if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    showCamError('insecure');
+    return false;
+  }
+  stopCamera();
+  let stream;
+  try {
+    stream = await getStream(settings.cameraId ? { ...CAM_BASE, deviceId: { exact: settings.cameraId } } : { ...CAM_BASE, facingMode: 'user' });
+  } catch (e) {
+    const kind = classifyCamError(e);
+    if (kind === 'notfound') {
+      try { settings.cameraId = ''; saveSettings(); stream = await getStream(true); }
+      catch (e2) { showCamError(classifyCamError(e2), e2); return false; }
+    } else { showCamError(kind, e); return false; }
+  }
+  // 冇指定鏡頭時，優先用 MacBook 內置鏡頭（避免用咗 iPhone 接續互通相機）
+  if (!settings.cameraId) {
+    try {
+      const cams = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput');
+      const curId = stream.getVideoTracks()[0].getSettings().deviceId;
+      const cur = cams.find((c) => c.deviceId === curId);
+      const builtIn = cams.find((c) => isBuiltInCam(c.label));
+      if (builtIn && builtIn.deviceId !== curId && !(cur && isBuiltInCam(cur.label))) {
+        const s2 = await getStream({ ...CAM_BASE, deviceId: { exact: builtIn.deviceId } });
+        stream.getTracks().forEach((t) => t.stop());
+        stream = s2;
+      }
+    } catch (e) { /* 用返原本嗰個鏡頭 */ }
+  }
+  app.stream = stream;
+  const track = stream.getVideoTracks()[0];
+  track.addEventListener('ended', () => { if (app.stream === stream) { stopCamera(); showCamError('lost'); } });
+  els.video.srcObject = stream;
+  try { await els.video.play(); } catch (e) { /* 靜音影片一般可以播放 */ }
+  const ok = await new Promise((resolve) => {
+    const t0 = performance.now();
+    (function check() {
+      if (els.video.videoWidth > 0 && els.video.readyState >= 2) resolve(true);
+      else if (performance.now() - t0 > 10000) resolve(false);
+      else setTimeout(check, 100);
+    })();
+  });
+  if (!ok) { stopCamera(); showCamError('unknown'); return false; }
+  refreshCameraList();
+  return true;
+}
+async function refreshCameraList() {
+  try {
+    const cams = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput');
+    const curId = app.stream ? app.stream.getVideoTracks()[0].getSettings().deviceId : '';
+    els.camSelect.replaceChildren(...cams.map((c, i) => {
+      const o = document.createElement('option');
+      o.value = c.deviceId;
+      o.textContent = (c.label || `鏡頭 ${i + 1}`) + (isBuiltInCam(c.label) ? '（內置）' : '');
+      o.selected = c.deviceId === curId;
+      return o;
+    }));
+  } catch (e) { /* 忽略 */ }
+}
+
+/* =========================================================
+   MediaPipe Face Landmarker
+   ========================================================= */
+let mpPromise = null;
+function withTimeout(p, ms, label) {
+  return Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(`${label} 逾時（${ms / 1000} 秒）`)), ms))]);
+}
+function loadMediaPipe() {
+  if (mpPromise) return mpPromise;
+  app.mpStatus = 'loading';
+  updateMpStatus();
+  mpPromise = (async () => {
+    const vision = await withTimeout(import(`${MP_BASE}/vision_bundle.mjs`), 30000, '載入程式庫');
+    const fileset = await withTimeout(vision.FilesetResolver.forVisionTasks(`${MP_BASE}/wasm`), 30000, '載入 WASM');
+    const options = (delegate) => ({
+      baseOptions: { modelAssetPath: MODEL_URL, delegate },
+      runningMode: 'VIDEO',
+      numFaces: MAX_FACES,
+      outputFaceBlendshapes: true,
+      outputFacialTransformationMatrixes: false,
+      minFaceDetectionConfidence: 0.5,
+      minFacePresenceConfidence: 0.5,
+      minTrackingConfidence: 0.5,
+    });
+    let lm;
+    try {
+      lm = await withTimeout(vision.FaceLandmarker.createFromOptions(fileset, options('GPU')), 45000, '載入模型');
+    } catch (e) {
+      console.warn('GPU 模式唔得，改用 CPU 模式', e);
+      lm = await withTimeout(vision.FaceLandmarker.createFromOptions(fileset, options('CPU')), 45000, '載入模型');
+    }
+    app.landmarker = lm;
+    app.mpStatus = 'ready';
+    app.mpError = null;
+    updateMpStatus();
+    return lm;
+  })().catch((err) => {
+    app.mpStatus = 'failed';
+    app.mpError = err;
+    mpPromise = null;
+    updateMpStatus();
+    throw err;
+  });
+  return mpPromise;
+}
+function updateMpStatus() {
+  els.mpStatus.textContent = {
+    loading: '臉部偵測：載入中……（第一次開需要網絡，約 10MB）',
+    ready: '臉部偵測：✅ 準備好',
+    failed: '臉部偵測：⚠️ 載入失敗（撳「開始」會再試）',
+    skipped: '臉部偵測：已略過（只用相框）',
+  }[app.mpStatus] || '';
+}
+function ensureMediaPipe() {
+  if (app.mpStatus === 'ready' || app.mpStatus === 'skipped') return;
+  loadMediaPipe().catch((e) => { if (app.phase !== 'welcome') showMpError(e); });
+}
+
+/* =========================================================
+   錯誤畫面
+   ========================================================= */
+function showError({ title, msg, steps, tech, buttons }) {
+  els.errorTitle.textContent = title;
+  els.errorMsg.textContent = msg;
+  els.errorSteps.replaceChildren(...steps.map((s) => { const li = document.createElement('li'); li.textContent = s; return li; }));
+  els.errorTech.textContent = tech ? `技術資料：${tech}` : '';
+  els.errorButtons.replaceChildren(...buttons.map(([label, cls, fn]) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.textContent = label; if (cls) b.className = cls;
+    b.addEventListener('click', () => { b.blur(); fn(); });
+    return b;
+  }));
+  app.modal = 'error';
+  els.loading.classList.add('hidden');
+  els.errorBox.classList.remove('hidden');
+  const first = els.errorButtons.querySelector('button');
+  if (first) first.focus();
+}
+function hideError() {
+  els.errorBox.classList.add('hidden');
+  if (app.modal === 'error') app.modal = null;
+}
+function showCamError(kind, err) {
+  const info = CAM_ERRORS[kind] || CAM_ERRORS.unknown;
+  cancelCountdown();
+  els.preview.classList.add('hidden');
+  els.settings.classList.add('hidden');
+  app.phase = 'starting';
+  showError({
+    ...info,
+    tech: err ? `${err.name || ''} ${err.message || ''}`.trim() : '',
+    buttons: [['🔄 再試一次', 'btn-main', () => { hideError(); start(true); }], ['重新整理網頁', '', () => location.reload()]],
+  });
+}
+function showMpError(err) {
+  if (app.modal === 'error') return;
+  showError({
+    title: '臉部偵測功能載入失敗',
+    msg: '頭飾需要「臉部偵測」先可以跟住塊面郁。可能係網絡未連接或者太慢。',
+    steps: ['檢查部電腦有冇連接 Wi-Fi／互聯網', '撳「再試一次」', '如果急住用，可以撳「只用相框繼續」：冇頭飾，但一樣可以影相同儲存'],
+    tech: err ? String(err.message || err) : '',
+    buttons: [
+      ['🔄 再試一次', 'btn-main', () => { hideError(); ensureMediaPipe(); }],
+      ['只用相框繼續', '', () => { hideError(); app.mpStatus = 'skipped'; updateMpStatus(); toast('已轉為只用相框模式'); }],
+    ],
+  });
+}
+
+/* =========================================================
+   開始
+   ========================================================= */
+async function start(retry) {
+  if (app.phase !== 'welcome' && !(retry && app.phase === 'starting')) return;
+  unlockAudio();
+  pickVoice();
+  app.phase = 'starting';
+  els.welcome.classList.add('hidden');
+  els.loadingText.textContent = '正在開啟鏡頭……';
+  els.loadingSub.textContent = '如果 Chrome 問你「使用相機」，請撳「允許」';
+  els.loading.classList.remove('hidden');
+  const ok = await startCamera();
+  if (!ok) return;
+  els.loading.classList.add('hidden');
+  app.phase = 'live';
+  fitStage();
+  ensureMediaPipe();
+}
+
+/* =========================================================
+   介面更新
+   ========================================================= */
+function setTheme(i) {
+  if (app.phase !== 'live' && app.phase !== 'welcome' && app.phase !== 'starting') return;
+  app.themeIndex = (i + THEMES.length) % THEMES.length;
+  updateThemeUI();
+}
+function updateThemeUI() {
+  const th = currentTheme();
+  els.themeName.textContent = `${th.icon} ${th.name}`;
+  els.themeCount.textContent = `${app.themeIndex + 1} / ${THEMES.length}`;
+  const hw = currentHeadwear(th);
+  els.hatBtn.textContent = th.headwear.length > 1 ? `👒 頭飾：${hw.name}` : '👒 頭飾：冇';
+  els.hatBtn.disabled = th.headwear.length <= 1;
+  els.filterBtn.classList.toggle('hidden', !th.hasFilter);
+  els.filterBtn.textContent = `🎞 濾鏡：${(VINTAGE_FILTERS.find((f) => f.id === settings.vintageFilter) || VINTAGE_FILTERS[0]).name}`;
+}
+function cycleHeadwear() {
+  const th = currentTheme();
+  if (th.headwear.length <= 1) return;
+  const idx = th.headwear.indexOf(currentHeadwear(th));
+  const next = th.headwear[(idx + 1) % th.headwear.length];
+  settings.headwear[th.id] = next.id;
+  saveSettings(); updateThemeUI();
+  toast(`頭飾：${next.name}`);
+}
+function cycleFilter() {
+  if (!currentTheme().hasFilter) return;
+  settings.vintageFilter = settings.vintageFilter === 'bw' ? 'sepia' : 'bw';
+  saveSettings(); updateThemeUI(); buildSettings();
+}
+function toggleAutoSmile() {
+  app.autoSmile = !app.autoSmile;
+  app.smileStart = 0;
+  app.smileCooldownUntil = performance.now() + 1500;
+  els.autoBtn.classList.toggle('on', app.autoSmile);
+  els.autoBtn.textContent = `😊 笑一笑自動影相：${app.autoSmile ? '開' : '關'}`;
+  if (app.autoSmile && app.mpStatus !== 'ready') toast('臉部偵測未準備好，暫時用唔到自動影相', true);
+}
+function toggleControls() {
+  app.controlsHidden = !app.controlsHidden;
+  els.app.classList.toggle('no-controls', app.controlsHidden);
+  requestAnimationFrame(fitStage);
+}
+function toggleFullscreen() {
+  if (!document.fullscreenElement) {
+    const p = document.documentElement.requestFullscreen && document.documentElement.requestFullscreen();
+    if (p && p.catch) p.catch(() => toast('開唔到全螢幕，請再撳一次 F', true));
+  } else if (document.exitFullscreen) {
+    document.exitFullscreen();
+  }
+}
+document.addEventListener('fullscreenchange', () => {
+  els.fsBtn.textContent = document.fullscreenElement ? '⛶ 離開全螢幕' : '⛶ 全螢幕';
+  requestAnimationFrame(fitStage);
+});
+
+let toastTimer = 0;
+function toast(text, warn) {
+  els.toast.textContent = text;
+  els.toast.classList.toggle('warn', !!warn);
+  els.toast.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => els.toast.classList.remove('show'), 2600);
+}
+
+/* ---------- 設定視窗 ---------- */
+function makeSeg(container, options, current, onPick) {
+  container.replaceChildren(...options.map((o) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.textContent = o.name;
+    b.classList.toggle('sel', o.id === current);
+    b.addEventListener('click', () => { onPick(o.id); buildSettings(); updateThemeUI(); });
+    return b;
+  }));
+}
+function buildSettings() {
+  makeSeg(els.segFilter, VINTAGE_FILTERS, settings.vintageFilter, (id) => { settings.vintageFilter = id; saveSettings(); });
+  makeSeg(els.segSmile, SMILE_LEVELS, settings.smileLevel, (id) => { settings.smileLevel = id; saveSettings(); });
+  makeSeg(els.segVoice, [{ id: true, name: '開' }, { id: false, name: '關' }], settings.voice, (v) => { settings.voice = v; saveSettings(); if (v) speak('三、二、一，笑一笑！'); });
+  makeSeg(els.segShutter, [{ id: true, name: '開' }, { id: false, name: '關' }], settings.shutter, (v) => { settings.shutter = v; saveSettings(); if (v) { unlockAudio(); playShutter(); } });
+}
+function openSettings() {
+  if (app.phase === 'countdown' || app.phase === 'preview' || app.modal) return;
+  els.actName.value = settings.activityName;
+  els.actDate.value = dateText;
+  buildSettings();
+  refreshCameraList();
+  app.modal = 'settings';
+  els.settings.classList.remove('hidden');
+  els.actName.focus();
+}
+function closeSettings() {
+  els.settings.classList.add('hidden');
+  if (app.modal === 'settings') app.modal = null;
+  document.activeElement && document.activeElement.blur();
+}
+els.actName.addEventListener('input', () => { settings.activityName = els.actName.value; saveSettings(); });
+els.actDate.addEventListener('input', () => { dateText = els.actDate.value; });
+els.todayBtn.addEventListener('click', () => { dateText = todayText(); els.actDate.value = dateText; });
+els.camSelect.addEventListener('change', async () => {
+  settings.cameraId = els.camSelect.value; saveSettings();
+  if (app.phase === 'live') {
+    const ok = await startCamera();
+    if (ok) { closeSettings(); toast('已轉鏡頭'); }
+  }
+});
+els.closeSettings.addEventListener('click', closeSettings);
+els.settings.addEventListener('click', (e) => { if (e.target === els.settings) closeSettings(); });
+
+/* ---------- 按鈕 ---------- */
+function onClick(el, fn) { el.addEventListener('click', (e) => { e.currentTarget.blur(); fn(); }); }
+onClick(els.startBtn, () => start());
+onClick(els.prevBtn, () => setTheme(app.themeIndex - 1));
+onClick(els.nextBtn, () => setTheme(app.themeIndex + 1));
+onClick(els.settingsBtn, openSettings);
+onClick(els.fsBtn, toggleFullscreen);
+onClick(els.hatBtn, cycleHeadwear);
+onClick(els.filterBtn, cycleFilter);
+onClick(els.shootBtn, startCountdown);
+onClick(els.autoBtn, toggleAutoSmile);
+onClick(els.saveBtn, savePhoto);
+onClick(els.retakeBtn, retake);
+
+/* ---------- 鍵盤快捷鍵 ---------- */
+document.addEventListener('keydown', (e) => {
+  if (e.isComposing || e.metaKey || e.ctrlKey || e.altKey) return;
+  const tag = (e.target && e.target.tagName) || '';
+  const typing = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+  if (e.code === 'Escape') {
+    if (app.modal === 'settings') closeSettings();
+    else if (app.phase === 'countdown') cancelCountdown();
+    else if (app.phase === 'preview') retake();
+    return;
+  }
+  if (typing || app.modal) return;
+  const k = e.code;
+  const handled = () => e.preventDefault();
+  if (k === 'Space' || k === 'Enter') {
+    handled();
+    if (e.repeat) return;
+    if (app.phase === 'welcome') start();
+    else if (app.phase === 'live' && k === 'Space') startCountdown();
+    else if (app.phase === 'preview' && k === 'Space') retake();
+    return;
+  }
+  if (k === 'KeyF') { handled(); toggleFullscreen(); return; }
+  if (app.phase === 'preview') {
+    if (k === 'KeyS') { handled(); savePhoto(); }
+    return;
+  }
+  if (app.phase !== 'live') return;
+  if (k === 'ArrowLeft') { handled(); setTheme(app.themeIndex - 1); }
+  else if (k === 'ArrowRight') { handled(); setTheme(app.themeIndex + 1); }
+  else if (k === 'KeyH') { handled(); cycleHeadwear(); }
+  else if (k === 'KeyV') { handled(); cycleFilter(); }
+  else if (k === 'KeyA') { handled(); toggleAutoSmile(); }
+  else if (k === 'KeyC') { handled(); toggleControls(); }
+  else if (/^Digit[1-9]$/.test(k)) {
+    const i = Number(k.slice(5)) - 1;
+    if (i < THEMES.length) { handled(); setTheme(i); }
+  }
+});
+
+/* ---------- 滑鼠一陣唔郁就收埋（接電視時唔會見到箭咀） ---------- */
+let idleTimer = 0;
+function setIdle(v) { document.body.classList.toggle('idle', v); }
+document.addEventListener('mousemove', () => {
+  setIdle(false);
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => { if (app.phase === 'live' && !app.modal) setIdle(true); }, 3000);
+});
+
+/* ---------- 啟動 ---------- */
+updateThemeUI();
+updateMpStatus();
+loadMediaPipe().catch(() => { /* 撳「開始」時會再試並顯示提示 */ });
+requestAnimationFrame(loop);
+els.startBtn.focus();
+
+// 方便工作員／技術人員排查問題（只讀）
+window.arPhotoFrame = {
+  get phase() { return app.phase; },
+  get faces() { return app.tracks.map((t) => ({ x: +t.x.toFixed(3), y: +t.y.toFixed(3), w: +t.w.toFixed(3), angleDeg: +(t.angle * 180 / Math.PI).toFixed(1), smile: +t.smile.toFixed(2) })); },
+  get mediapipe() { return app.mpStatus; },
+  get brightness() { return Math.round(app.brightness); },
+  get hint() { return app.hintShown; },
+};
+</script>
+</body>
+</html>
